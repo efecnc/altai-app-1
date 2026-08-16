@@ -65,7 +65,7 @@ pub struct SqliteRoutineRepository {
 impl SqliteRoutineRepository {
     pub fn open(path: &Path) -> Result<Self, String> {
         let connection = Connection::open(path).map_err(|e| e.to_string())?;
-        connection.execute_batch("PRAGMA busy_timeout = 5000; CREATE TABLE IF NOT EXISTS control_plane_routines (routine_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL); CREATE TABLE IF NOT EXISTS control_plane_routine_revisions (routine_revision_id TEXT PRIMARY KEY, routine_id TEXT NOT NULL, revision INTEGER NOT NULL, payload_json TEXT NOT NULL); CREATE TABLE IF NOT EXISTS control_plane_routine_fires (routine_id TEXT PRIMARY KEY, last_fired_at INTEGER NOT NULL);").map_err(|e| e.to_string())?;
+        connection.execute_batch("PRAGMA busy_timeout = 5000; CREATE TABLE IF NOT EXISTS control_plane_routines (routine_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL); CREATE TABLE IF NOT EXISTS control_plane_routine_revisions (routine_revision_id TEXT PRIMARY KEY, routine_id TEXT NOT NULL, revision INTEGER NOT NULL, payload_json TEXT NOT NULL); CREATE TABLE IF NOT EXISTS control_plane_routine_fires (routine_id TEXT PRIMARY KEY, last_fired_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS control_plane_routine_revisions_routine_id ON control_plane_routine_revisions (routine_id);").map_err(|e| e.to_string())?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -354,6 +354,25 @@ mod tests {
             target_work_item_id: WorkItemId::new("work"),
             created_at_unix_seconds: seq * 10,
         }
+    }
+
+    #[test]
+    fn routine_revisions_are_indexed_by_routine_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("work.db");
+        SqliteRoutineRepository::open(&database).unwrap();
+
+        // The revision-history scan path filters revisions by routine_id; an
+        // index keeps that scan off a full table walk.
+        let connection = Connection::open(&database).unwrap();
+        let indexed: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='control_plane_routine_revisions_routine_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1);
     }
 
     #[test]
