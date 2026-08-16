@@ -109,46 +109,52 @@ impl ApprovalRepository for SqliteApprovalRepository {
                 approval_id: decision.approval_id.value.clone(),
             }
         })?;
-        // First-writer-wins: an approval is decided exactly once.
-        let existing: Option<String> = tx
+        // First-writer-wins: an approval is decided exactly once. The insert no-ops
+        // when a decision row already owns the approval; the stored row (ours or
+        // the earlier writer's) then arbitrates identical replay vs divergence.
+        let inserted = tx
+            .execute(
+                "INSERT INTO control_plane_approval_decisions (approval_id, payload_json) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
+                params![decision.approval_id.value, decision_payload],
+            )
+            .map_err(Self::db)?;
+        let stored_payload: String = tx
             .query_row(
                 "SELECT payload_json FROM control_plane_approval_decisions WHERE approval_id=?1",
                 [&decision.approval_id.value],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(Self::db)?;
-        if let Some(existing_payload) = existing {
-            let stored: ApprovalDecision =
-                serde_json::from_str(&existing_payload).map_err(|e| ApprovalError::Internal {
-                    reason: e.to_string(),
-                })?;
-            // Idempotent when the same decision is re-recorded; reject a divergent one.
-            if stored == decision {
-                tx.commit().map_err(Self::db)?;
-                return Ok(approval);
-            }
+            .map_err(Self::db)?
+            .ok_or_else(|| ApprovalError::Internal {
+                reason: "decision row missing after insert".into(),
+            })?;
+        let stored: ApprovalDecision =
+            serde_json::from_str(&stored_payload).map_err(|e| ApprovalError::Internal {
+                reason: e.to_string(),
+            })?;
+        // Idempotent when the same decision is re-recorded; reject a divergent one.
+        if stored != decision {
             return Err(ApprovalError::Conflict {
                 approval_id: decision.approval_id.value,
             });
         }
-        tx.execute(
-            "INSERT INTO control_plane_approval_decisions (approval_id, payload_json) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
-            params![decision.approval_id.value, decision_payload],
-        )
-        .map_err(Self::db)?;
-        approval.outcome = Some(decision.outcome);
-        approval.resolved_at_unix_seconds = Some(decision.decided_at_unix_seconds);
-        approval.revision = approval.revision.next();
-        let approval_payload =
-            serde_json::to_string(&approval).map_err(|e| ApprovalError::Internal {
-                reason: e.to_string(),
-            })?;
-        tx.execute(
-            "UPDATE control_plane_approvals SET payload_json=?2 WHERE approval_id=?1",
-            params![approval.id.value, approval_payload],
-        )
-        .map_err(Self::db)?;
+        // Only a genuinely new decision advances the aggregate; a replay returns
+        // the durable approval as the earlier writer left it.
+        if inserted == 1 {
+            approval.outcome = Some(decision.outcome);
+            approval.resolved_at_unix_seconds = Some(decision.decided_at_unix_seconds);
+            approval.revision = approval.revision.next();
+            let approval_payload =
+                serde_json::to_string(&approval).map_err(|e| ApprovalError::Internal {
+                    reason: e.to_string(),
+                })?;
+            tx.execute(
+                "UPDATE control_plane_approvals SET payload_json=?2 WHERE approval_id=?1",
+                params![approval.id.value, approval_payload],
+            )
+            .map_err(Self::db)?;
+        }
         tx.commit().map_err(Self::db)?;
         Ok(approval)
     }
@@ -340,6 +346,34 @@ mod tests {
         // The approval is unchanged: still approved.
         let stored = repo.get(&approval_id).unwrap().unwrap();
         assert_eq!(stored.outcome, Some(ApprovalOutcome::Approved));
+    }
+
+    #[test]
+    fn record_decision_first_writer_wins_across_connections() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("work.db");
+        let first = SqliteApprovalRepository::open(&database).unwrap();
+        let second = SqliteApprovalRepository::open(&database).unwrap();
+        let approval_id = ApprovalId::new("apv");
+        first.create(approval("apv")).unwrap();
+
+        let resolved = first
+            .record_decision(decision("apv", ApprovalOutcome::Approved))
+            .unwrap();
+        // A second writer replaying the identical decision is idempotent and
+        // does not advance the aggregate again.
+        let replay = second
+            .record_decision(decision("apv", ApprovalOutcome::Approved))
+            .unwrap();
+        assert_eq!(replay.revision, resolved.revision);
+        // A divergent second writer cannot overwrite the first decision.
+        assert!(matches!(
+            second.record_decision(decision("apv", ApprovalOutcome::Denied)),
+            Err(ApprovalError::Conflict { .. })
+        ));
+        let stored = second.get(&approval_id).unwrap().unwrap();
+        assert_eq!(stored.outcome, Some(ApprovalOutcome::Approved));
+        assert_eq!(stored.revision, resolved.revision);
     }
 
     #[test]
