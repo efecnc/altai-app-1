@@ -169,14 +169,14 @@ architecture, security, and replacement decision. “Study” does not count as 
 
 The next PRs are fixed until this list is updated by an accepted change:
 
-1. `CP-08-84` — Paperclip acceptance-spike harness vs stub plane (080 PR 5)
-   (Per `PAPERCLIP_SPIKE_PLAN.md` §3–4: an `altai-cli paperclip-spike`
-   subcommand that drives registration (bootstrap credential →
-   registration grant → host register), provisions one Work fixture,
-   enqueues a wake, claims it, checks out, and executes the reconnect
-   drop twice with the 020–024 idempotency invariants asserted between
-   runs — against a stub plane first, so the harness is green in CI
-   without the Paperclip service. Typed non-zero exit on any break.)
+1. `CP-08-85` — End-to-end spike vs the real downstream plane (080 PR 6)
+   (Per `PAPERCLIP_SPIKE_PLAN.md` §4: run the `altai-cli paperclip-spike`
+   harness against the real downstream Paperclip plane with the
+   `altai-host` adapter wired to the protocol path — IsanAgent attempt
+   (034), event translation (035), Review projection with evidence (045).
+   Record the pass evidence in the downstream task record and the 080
+   acceptance row. The spike's pass is declared only when this harness run
+   is green against the real downstream.)
 
 ## 5. Project-manager update protocol
 
