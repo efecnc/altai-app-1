@@ -19,6 +19,12 @@ altai-protocol = { path = "../altai-protocol" }
 async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
+# Real-plane spike mode (CP-08-85): loopback HTTP client riding the same
+# hyper stack axum serves with — no new external crates beyond the tree.
+hyper = "1"
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = "4.6.0"
 isanagent = { git = "https://github.com/altaidevorg/isanagent.git", branch = "main" }

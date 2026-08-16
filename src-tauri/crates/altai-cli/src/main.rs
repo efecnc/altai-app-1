@@ -112,12 +112,34 @@ enum Commands {
         #[command(subcommand)]
         command: InboxCommands,
     },
-    /// Run the Paperclip acceptance-spike harness against a stub plane
-    /// (Work OS CP-08; see docs/control-plane-execution/PAPERCLIP_SPIKE_PLAN.md).
+    /// Run the Paperclip acceptance-spike harness (Work OS CP-08; see
+    /// docs/control-plane-execution/PAPERCLIP_SPIKE_PLAN.md).
     PaperclipSpike {
         /// Print a machine-readable JSON report instead of progress lines.
         #[arg(long)]
         json: bool,
+        /// Which plane the scenario rides: `stub` keeps the CP-08-84 wire
+        /// rehearsal (in-process router, one-shot calls); `real` binds the
+        /// production router to a loopback listener and drives every step over
+        /// real HTTP, adding the attempt, event-translation, and review phases.
+        #[arg(long, default_value = "stub")]
+        plane: SpikePlaneArg,
+        /// Loopback listener for `--plane real`. Defaults to an ephemeral
+        /// port; the 080 acceptance run pins the port the downstream's
+        /// altai-host adapter is configured against.
+        #[arg(long)]
+        bind: Option<std::net::SocketAddr>,
+        /// Base URL of the downstream Paperclip plane whose projection the
+        /// review phase asserts. Falls back to PAPERCLIP_SPIKE_DOWNSTREAM_URL.
+        /// Without it the review phase reports a typed skip.
+        #[arg(long)]
+        downstream_url: Option<String>,
+        /// The Paperclip issue the runbook bound to the spike's Work item —
+        /// the projection the review phase polls (`in_review` with evidence).
+        /// Falls back to PAPERCLIP_SPIKE_DOWNSTREAM_ISSUE. Required together
+        /// with --downstream-url.
+        #[arg(long)]
+        downstream_issue: Option<String>,
     },
 }
 
@@ -601,18 +623,66 @@ fn run() -> Result<(), CliError> {
         Some(Commands::Journal { command }) => journal(command),
         Some(Commands::Work { command }) => work_command(command),
         Some(Commands::Inbox { command }) => inbox_command(command),
-        Some(Commands::PaperclipSpike { json }) => paperclip_spike_command(json),
+        Some(Commands::PaperclipSpike {
+            json,
+            plane,
+            bind,
+            downstream_url,
+            downstream_issue,
+        }) => paperclip_spike_command(json, plane, bind, downstream_url, downstream_issue),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum SpikePlaneArg {
+    /// CP-08-84 wire rehearsal: the production router in-process, one call per
+    /// step, no network.
+    Stub,
+    /// CP-08-85 end-to-end: the production router on a loopback listener, every
+    /// step over real HTTP, plus attempt/event/review phases.
+    Real,
 }
 
 /// The spike harness is async (in-process axum router); give it the same
 /// multi-thread runtime shape the serve path uses.
-fn paperclip_spike_command(json: bool) -> Result<(), CliError> {
+fn paperclip_spike_command(
+    json: bool,
+    plane: SpikePlaneArg,
+    bind: Option<std::net::SocketAddr>,
+    downstream_url: Option<String>,
+    downstream_issue: Option<String>,
+) -> Result<(), CliError> {
+    let url = downstream_url.or_else(|| {
+        std::env::var("PAPERCLIP_SPIKE_DOWNSTREAM_URL")
+            .ok()
+            .filter(|url| !url.is_empty())
+    });
+    let issue = downstream_issue.or_else(|| {
+        std::env::var("PAPERCLIP_SPIKE_DOWNSTREAM_ISSUE")
+            .ok()
+            .filter(|issue| !issue.is_empty())
+    });
+    let downstream = match (url, issue) {
+        (None, None) => None,
+        (Some(base_url), Some(issue_id)) => {
+            Some(paperclip_spike::DownstreamPlane { base_url, issue_id })
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(CliError::Message(
+                "--downstream-url and --downstream-issue (or their env fallbacks) must be set together"
+                    .to_string(),
+            ));
+        }
+    };
+    let mode = match plane {
+        SpikePlaneArg::Stub => paperclip_spike::SpikeMode::Stub,
+        SpikePlaneArg::Real => paperclip_spike::SpikeMode::Real { bind, downstream },
+    };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| CliError::Message(format!("failed to start spike runtime: {error}")))?
-        .block_on(paperclip_spike::run(json))
+        .block_on(paperclip_spike::run(json, mode))
         .map_err(|failure| CliError::Spike {
             code: failure.phase.exit_code(),
             message: failure.to_string(),
@@ -718,9 +788,7 @@ fn inbox_command(command: InboxCommands) -> Result<(), CliError> {
     }
 }
 
-fn open_workspace_work(
-    path: Option<&Path>,
-) -> Result<(String, altai_core::WorkStore), CliError> {
+fn open_workspace_work(path: Option<&Path>) -> Result<(String, altai_core::WorkStore), CliError> {
     let workspace = altai_core::resolve_workspace(path)
         .map_err(|error| CliError::Message(error.to_string()))?;
     let project_id = workspace
@@ -732,11 +800,7 @@ fn open_workspace_work(
     let store = altai_core::WorkStore::open(&workspace.work_db())
         .map_err(|error| CliError::Message(format!("could not open work.db: {error}")))?;
     store
-        .ensure_project(
-            &project_id,
-            &project_id,
-            &workspace.root.to_string_lossy(),
-        )
+        .ensure_project(&project_id, &project_id, &workspace.root.to_string_lossy())
         .map_err(|error| CliError::Message(error.to_string()))?;
     Ok((project_id, store))
 }
@@ -818,7 +882,10 @@ fn work_list(args: WorkListArgs) -> Result<(), CliError> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).unwrap_or_default()
+        );
         return Ok(());
     }
     for item in &items {
@@ -858,7 +925,10 @@ fn inbox_list(args: InboxListArgs) -> Result<(), CliError> {
         .map_err(|error| CliError::Message(error.to_string()))?;
     if args.json {
         let rows = items.iter().map(work_inbox_value).collect::<Vec<_>>();
-        println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).unwrap_or_default()
+        );
     } else {
         for item in &items {
             println!("{}", format_work_inbox_row(item));
@@ -2213,15 +2283,9 @@ mod tests {
         };
         assert_eq!(show.workspace, Some(PathBuf::from("/tmp/project")));
 
-        let start = Cli::try_parse_from([
-            "altai-cli",
-            "work",
-            "start",
-            "work_1",
-            "--revision",
-            "2",
-        ])
-        .expect("start should default to cwd");
+        let start =
+            Cli::try_parse_from(["altai-cli", "work", "start", "work_1", "--revision", "2"])
+                .expect("start should default to cwd");
         let Some(Commands::Work {
             command: WorkCommands::Start(start),
         }) = start.command
@@ -2276,14 +2340,9 @@ mod tests {
         assert!(review.r#return);
         assert_eq!(review.message, "Add coverage");
 
-        assert!(Cli::try_parse_from([
-            "altai-cli",
-            "work",
-            "show",
-            "work_1",
-            "/tmp/project",
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from(["altai-cli", "work", "show", "work_1", "/tmp/project",]).is_err()
+        );
     }
 
     #[test]
