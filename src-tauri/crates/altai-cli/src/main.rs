@@ -6,6 +6,7 @@ use std::process::{Command, ExitCode};
 
 mod host_adapter;
 mod journal_sink;
+mod paperclip_spike;
 mod run_output;
 mod serve;
 mod stdio_host;
@@ -110,6 +111,13 @@ enum Commands {
     Inbox {
         #[command(subcommand)]
         command: InboxCommands,
+    },
+    /// Run the Paperclip acceptance-spike harness against a stub plane
+    /// (Work OS CP-08; see docs/control-plane-execution/PAPERCLIP_SPIKE_PLAN.md).
+    PaperclipSpike {
+        /// Print a machine-readable JSON report instead of progress lines.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -524,6 +532,13 @@ enum CliError {
         code: run_output::RunExitCode,
         message: String,
     },
+    /// Paperclip acceptance-spike failure; the code names the phase that
+    /// broke (see `paperclip_spike::SpikePhase`). Starts at 30 so it can
+    /// never collide with the `run` command's public exit contract.
+    Spike {
+        code: u8,
+        message: String,
+    },
 }
 
 impl CliError {
@@ -534,6 +549,7 @@ impl CliError {
             // approval, provider, or workspace failure.
             Self::HostUnavailable { .. } => 10,
             Self::RunFailed { code, .. } => (*code).into(),
+            Self::Spike { code, .. } => *code,
             Self::Message(_) => 1,
         }
     }
@@ -548,6 +564,7 @@ impl std::fmt::Display for CliError {
                 "`altai-cli {command}` is declared but cannot run yet: the ALTAI adapter needs the reusable IsanAgent host API. Use `altai-cli doctor` to inspect the installed foundation."
             ),
             Self::RunFailed { message, .. } => f.write_str(message),
+            Self::Spike { message, .. } => write!(f, "paperclip-spike failed: {message}"),
         }
     }
 }
@@ -584,7 +601,22 @@ fn run() -> Result<(), CliError> {
         Some(Commands::Journal { command }) => journal(command),
         Some(Commands::Work { command }) => work_command(command),
         Some(Commands::Inbox { command }) => inbox_command(command),
+        Some(Commands::PaperclipSpike { json }) => paperclip_spike_command(json),
     }
+}
+
+/// The spike harness is async (in-process axum router); give it the same
+/// multi-thread runtime shape the serve path uses.
+fn paperclip_spike_command(json: bool) -> Result<(), CliError> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| CliError::Message(format!("failed to start spike runtime: {error}")))?
+        .block_on(paperclip_spike::run(json))
+        .map_err(|failure| CliError::Spike {
+            code: failure.phase.exit_code(),
+            message: failure.to_string(),
+        })
 }
 
 fn default_command(args: DefaultArgs) -> Result<(), CliError> {

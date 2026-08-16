@@ -225,6 +225,7 @@ dependencies = [
  "altai-core",
  "altai-protocol",
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "chrono",
  "clap",
@@ -239,6 +240,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.23",
+ "tower",
  "uuid",
 ]
 

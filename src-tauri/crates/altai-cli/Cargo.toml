@@ -17,13 +17,16 @@ altai-control-plane = { path = "../altai-control-plane" }
 altai-control-protocol = { path = "../altai-control-protocol" }
 altai-protocol = { path = "../altai-protocol" }
 async-trait = "0.1"
+axum = "0.8"
 base64 = "0.22"
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = "4.6.0"
 isanagent = { git = "https://github.com/altaidevorg/isanagent.git", branch = "main" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
 toml = "0.8"
+tower = { version = "0.5", features = ["util"] }
 log = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "signal", "sync", "time", "macros", "io-util", "io-std"] }
 chrono = "0.4"
