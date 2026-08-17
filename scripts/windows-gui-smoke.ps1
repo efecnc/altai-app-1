@@ -78,12 +78,14 @@ try {
   try {
     $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
     $bitmap.Save($ScreenshotPath, [System.Drawing.Imaging.ImageFormat]::Png)
-    # Sample the real application viewport. A blank WebView2 compositor is
-    # essentially one color; ALTAI's committed shell contains borders, labels,
-    # panels, and controls even on the welcome screen.
+    # Sample the painted shell, including app-owned Windows chrome. A blank
+    # WebView2 compositor is essentially one color. The no-project Home empty
+    # state is a sparse light canvas under a light OS theme, so skipping the
+    # top 72px only sampled that canvas (3 buckets) while tabs/labels sat in
+    # the chrome. Keep this grid in sync with `src/lib/guiSmokeColorBuckets.ts`.
     $colors = New-Object 'System.Collections.Generic.HashSet[string]'
-    for ($x = 24; $x -lt $width - 24; $x += 32) {
-      for ($y = 72; $y -lt $height - 24; $y += 32) {
+    for ($x = 16; $x -lt $width - 16; $x += 16) {
+      for ($y = 16; $y -lt $height - 16; $y += 16) {
         $pixel = $bitmap.GetPixel($x, $y)
         $bucket = '{0},{1},{2}' -f ([Math]::Floor($pixel.R / 8)), ([Math]::Floor($pixel.G / 8)), ([Math]::Floor($pixel.B / 8))
         [void]$colors.Add($bucket)
