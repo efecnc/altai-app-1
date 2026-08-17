@@ -64,9 +64,12 @@ pub enum SpikeMode {
 }
 
 /// The downstream Paperclip plane (runbook bring-up): the server's base URL
-/// and the issue the runbook bound to the spike's Work item. The Review
-/// probe reads Paperclip's own projection through its existing issue API —
-/// no downstream route is added for the spike.
+/// and the issue the runbook bound to the spike. Both sides derive the
+/// downstream lane's Work item id from the issue id (`wi_paperclip_<slug>`,
+/// see [`spike_slug`]) — the adapter dispatches into that lane, the harness
+/// executes it, and the Review probe reads Paperclip's own projection
+/// through its existing issue API. No downstream route is added for the
+/// spike.
 pub struct DownstreamPlane {
     pub base_url: String,
     pub issue_id: String,
@@ -424,6 +427,230 @@ async fn review_projection(
         "projection",
         format!("downstream projection never reached review with evidence: {last}"),
     ))
+}
+
+/// The shared id-slug rule: the adapter and the harness both derive the
+/// downstream lane's ids from the Paperclip issue id, keeping them clear of
+/// the rehearsal lane's fixtures.
+fn spike_slug(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect()
+}
+
+/// Execute the downstream lane (080 PR 6): the Paperclip plane dispatches —
+/// its `altai-host` adapter enqueues the wake over the wire — and this
+/// harness acts as the host the plan's topology names: it claims the wake,
+/// takes the transactional lease, runs the attempt lifecycle (the
+/// scheduler-internal transitions and event ingestion the wire deliberately
+/// does not serve), and finalizes. The adapter observes the translated
+/// events through the framed query wire and resolves Paperclip's run, whose
+/// projection the review phase then asserts.
+async fn execute_downstream_lane(
+    plane: &Plane,
+    wire: &Wire,
+    token: &str,
+    agent_instance: &AgentInstanceId,
+    issue_id: &str,
+) -> Result<(), SpikeFailure> {
+    let slug = spike_slug(issue_id);
+    let work_item = WorkItemId::new(format!("wi_paperclip_{slug}"));
+    plane
+        .work_graph
+        .register_work_item(work_item.clone())
+        .map_err(|_| {
+            SpikeFailure::new(
+                SpikePhase::Review,
+                "lane-work-item",
+                "registration rejected",
+            )
+        })?;
+
+    // Wait for the downstream dispatch: claiming over the wire is the wait —
+    // 404 until the adapter enqueues, 200 once dispatched.
+    let claim_uri = format!("/v1/wakes/{}/claim", work_item.value);
+    let mut dispatched = false;
+    for _ in 0..60 {
+        let (status, body) = wire
+            .call(
+                Method::POST,
+                &claim_uri,
+                Some(token),
+                Some(json!({ "claimed_at": "2026-08-16T00:10:00Z" })),
+            )
+            .await?;
+        match status {
+            StatusCode::OK => {
+                dispatched = true;
+                break;
+            }
+            StatusCode::NOT_FOUND => {}
+            _ => {
+                return Err(SpikeFailure::new(
+                    SpikePhase::Review,
+                    "lane-claim",
+                    format!("downstream wake claim returned {status}: {body}"),
+                ));
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    if !dispatched {
+        return Err(SpikeFailure::new(
+            SpikePhase::Review,
+            "lane-dispatch",
+            "downstream never dispatched: no wake arrived within the budget",
+        ));
+    }
+
+    // Same dance as the rehearsal lane, distinct ids and lease domain.
+    let attempt = AttemptId::new(format!("att_paperclip_{slug}"));
+    let lease = json!({
+        "lease": {
+            "work_item_id": work_item.to_json_value(),
+            "owner_agent_instance_id": agent_instance.to_json_value(),
+            "attempt_id": attempt.to_json_value(),
+            "expires_at_unix_seconds": 4_102_444_800u64,
+        },
+        "now_unix_seconds": 1_786_070_000u64,
+    });
+    let (status, body) = wire
+        .call(Method::POST, "/v1/work-checkouts", Some(token), Some(lease))
+        .await?;
+    expect(
+        SpikePhase::Review,
+        "lane-checkout",
+        StatusCode::CREATED,
+        status,
+        body,
+    )?;
+
+    plane
+        .attempts
+        .create(Attempt {
+            id: attempt.clone(),
+            work_item_id: work_item.clone(),
+            owner_agent_instance_id: agent_instance.clone(),
+            profile_revision_id: AgentProfileRevisionId::new("paperclip"),
+            state: AttemptState::Created,
+            created_at_unix_seconds: 1_786_070_050,
+            updated_at_unix_seconds: 1_786_070_050,
+        })
+        .map_err(|error| {
+            SpikeFailure::new(SpikePhase::Review, "lane-attempt-create", error.to_string())
+        })?;
+    let mut now = 1_786_070_110u64;
+    for state in [
+        AttemptState::Claimed,
+        AttemptState::Dispatched,
+        AttemptState::Running,
+    ] {
+        plane
+            .attempts
+            .transition(&attempt, state, now)
+            .map_err(|error| {
+                SpikeFailure::new(
+                    SpikePhase::Review,
+                    "lane-attempt-transition",
+                    error.to_string(),
+                )
+            })?;
+        now += 10;
+    }
+
+    let run_id = RunId::new(format!("run_paperclip_{slug}"));
+    let binding = json!({
+        "attempt_id": attempt.to_json_value(),
+        "work_item_id": work_item.to_json_value(),
+        "owner_agent_instance_id": agent_instance.to_json_value(),
+        "run_id": run_id.to_json_value(),
+        "bound_at_unix_seconds": 1_786_070_100u64,
+    });
+    let (status, body) = wire
+        .call(
+            Method::POST,
+            "/v1/runtime/run-bindings",
+            Some(token),
+            Some(binding),
+        )
+        .await?;
+    expect(
+        SpikePhase::Review,
+        "lane-bind-run",
+        StatusCode::OK,
+        status,
+        body,
+    )?;
+
+    let lifecycle = [
+        RunLifecycleEvent::Started {
+            run_id: run_id.value.clone(),
+            chat_id: format!("chat_{attempt}"),
+        },
+        RunLifecycleEvent::Terminated {
+            run_id: run_id.value.clone(),
+            chat_id: format!("chat_{attempt}"),
+            outcome: RunOutcome::Completed,
+        },
+    ];
+    let organization = OrganizationId::new("spike");
+    for (sequence, event) in lifecycle.iter().map(map_lifecycle_to_event).enumerate() {
+        let summary = match &event {
+            Event::RunStarted { run_id } => format!("run {run_id} started"),
+            Event::RunTerminated { run_id, outcome } => {
+                format!("run {run_id} terminated: {outcome}")
+            }
+            other => format!("{other:?}"),
+        };
+        plane
+            .activity
+            .append(ActivityEvent {
+                event_id: format!("evt_paperclip_{slug}_{sequence}"),
+                kind: EventKind::AttemptTransitioned,
+                actor: Actor::System {
+                    component: "paperclip-spike".into(),
+                },
+                timestamp: "2026-08-16T00:11:00Z".into(),
+                organization_id: organization.clone(),
+                project_id: None,
+                work_item_id: Some(work_item.clone()),
+                attempt_id: Some(attempt.clone()),
+                summary,
+                correlation_id: Some(run_id.value.clone()),
+                causation_id: None,
+            })
+            .map_err(|error| {
+                SpikeFailure::new(SpikePhase::Review, "lane-event-append", error.to_string())
+            })?;
+    }
+
+    let finalize_uri = format!("/v1/runtime/attempts/{}/finalize", attempt.value);
+    let (status, body) = wire
+        .call(
+            Method::POST,
+            &finalize_uri,
+            Some(token),
+            Some(json!({
+                "outcome": "succeeded",
+                "observed_at_unix_seconds": 1_786_070_200u64,
+            })),
+        )
+        .await?;
+    let body = expect(
+        SpikePhase::Review,
+        "lane-finalize",
+        StatusCode::OK,
+        status,
+        body,
+    )?;
+    if body["state"].as_str() != Some("succeeded") {
+        return Err(SpikeFailure::new(
+            SpikePhase::Review,
+            "lane-finalize",
+            format!("downstream attempt did not finalize as succeeded: {body}"),
+        ));
+    }
+    Ok(())
 }
 
 /// Assert a response landed on the expected status, returning the body.
@@ -933,8 +1160,24 @@ pub async fn run(json: bool, mode: SpikeMode) -> Result<(), SpikeFailure> {
         // assertion runs only against a configured downstream plane; without
         // one it records a typed skip (the 080 acceptance run sets it).
         match downstream {
-            Some(plane) => {
-                let projection = review_projection(&wire, plane).await?;
+            Some(downstream_plane) => {
+                // The real downstream exercise: Paperclip dispatches (its
+                // altai-host adapter enqueues the wake), the harness executes
+                // the lane, and the adapter observes the translated events.
+                execute_downstream_lane(
+                    &plane,
+                    &wire,
+                    &token,
+                    &agent_instance,
+                    &downstream_plane.issue_id,
+                )
+                .await?;
+                record(
+                    "lane",
+                    "downstream lane dispatched, executed, and finalized".to_string(),
+                    &mut report,
+                );
+                let projection = review_projection(&wire, downstream_plane).await?;
                 record(
                     "review",
                     format!("downstream projection reached review: {projection}"),
