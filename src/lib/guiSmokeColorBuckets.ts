@@ -27,7 +27,10 @@ export const GUI_SMOKE_SAMPLE = {
   minBuckets: 6,
 } as const satisfies SampleGrid & { minBuckets: number };
 
-export function colorBucket(pixel: Rgb, bucketSize = GUI_SMOKE_SAMPLE.bucketSize): string {
+export function colorBucket(
+  pixel: Rgb,
+  bucketSize: number = GUI_SMOKE_SAMPLE.bucketSize,
+): string {
   return `${Math.floor(pixel.r / bucketSize)},${Math.floor(pixel.g / bucketSize)},${Math.floor(pixel.b / bucketSize)}`;
 }
 
