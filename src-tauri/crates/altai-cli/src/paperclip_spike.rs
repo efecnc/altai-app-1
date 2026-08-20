@@ -60,6 +60,10 @@ pub enum SpikeMode {
     Real {
         bind: Option<SocketAddr>,
         downstream: Option<DownstreamPlane>,
+        /// A caller-provided local-only bootstrap credential. The acceptance
+        /// runner configures the downstream adapter with this same value;
+        /// generated values remain internal to a self-contained rehearsal.
+        bootstrap_token: Option<String>,
     },
 }
 
@@ -159,8 +163,13 @@ struct Plane {
     activity: Arc<SqliteActivityEventRepository>,
 }
 
-fn build_plane(dir: &std::path::Path) -> Result<Plane, SpikeFailure> {
-    let bootstrap_token = format!("bootstrap_{}", uuid::Uuid::new_v4());
+fn build_plane(
+    dir: &std::path::Path,
+    bootstrap_token: Option<&str>,
+) -> Result<Plane, SpikeFailure> {
+    let bootstrap_token = bootstrap_token
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("bootstrap_{}", uuid::Uuid::new_v4()));
     let plane = ControlPlane::bootstrap(ControlPlaneConfig {
         service_version: "paperclip-spike".to_string(),
         store: ControlPlaneStore::Sqlite {
@@ -693,7 +702,13 @@ fn host_registration(
 pub async fn run(json: bool, mode: SpikeMode) -> Result<(), SpikeFailure> {
     let dir = tempfile::tempdir()
         .map_err(|error| SpikeFailure::new(SpikePhase::Health, "tempdir", error.to_string()))?;
-    let plane = build_plane(dir.path())?;
+    let bootstrap_token = match &mode {
+        SpikeMode::Stub => None,
+        SpikeMode::Real {
+            bootstrap_token, ..
+        } => bootstrap_token.as_deref(),
+    };
+    let plane = build_plane(dir.path(), bootstrap_token)?;
     let token = plane.bootstrap_token.clone();
     let mut report: Vec<Value> = Vec::new();
     let record = |step: &str, detail: String, report: &mut Vec<Value>| {
@@ -1416,10 +1431,19 @@ mod tests {
             SpikeMode::Real {
                 bind: None,
                 downstream: None,
+                bootstrap_token: None,
             },
         )
         .await
         .expect("scenario over real HTTP plane");
+    }
+
+    #[test]
+    fn caller_supplied_bootstrap_credential_is_retained() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plane = build_plane(dir.path(), Some("local-acceptance-token"))
+            .expect("plane with caller credential");
+        assert_eq!(plane.bootstrap_token, "local-acceptance-token");
     }
 
     #[tokio::test]
