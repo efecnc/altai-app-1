@@ -129,6 +129,12 @@ enum Commands {
         /// altai-host adapter is configured against.
         #[arg(long)]
         bind: Option<std::net::SocketAddr>,
+        /// Bootstrap bearer token for a real-plane run. This lets the local
+        /// Paperclip altai-host adapter authenticate without the harness
+        /// exposing a generated credential in its progress output. Falls back
+        /// to PAPERCLIP_SPIKE_BOOTSTRAP_TOKEN.
+        #[arg(long)]
+        bootstrap_token: Option<String>,
         /// Base URL of the downstream Paperclip plane whose projection the
         /// review phase asserts. Falls back to PAPERCLIP_SPIKE_DOWNSTREAM_URL.
         /// Without it the review phase reports a typed skip.
@@ -627,9 +633,17 @@ fn run() -> Result<(), CliError> {
             json,
             plane,
             bind,
+            bootstrap_token,
             downstream_url,
             downstream_issue,
-        }) => paperclip_spike_command(json, plane, bind, downstream_url, downstream_issue),
+        }) => paperclip_spike_command(
+            json,
+            plane,
+            bind,
+            bootstrap_token,
+            downstream_url,
+            downstream_issue,
+        ),
     }
 }
 
@@ -649,6 +663,7 @@ fn paperclip_spike_command(
     json: bool,
     plane: SpikePlaneArg,
     bind: Option<std::net::SocketAddr>,
+    bootstrap_token: Option<String>,
     downstream_url: Option<String>,
     downstream_issue: Option<String>,
 ) -> Result<(), CliError> {
@@ -661,6 +676,11 @@ fn paperclip_spike_command(
         std::env::var("PAPERCLIP_SPIKE_DOWNSTREAM_ISSUE")
             .ok()
             .filter(|issue| !issue.is_empty())
+    });
+    let bootstrap_token = bootstrap_token.or_else(|| {
+        std::env::var("PAPERCLIP_SPIKE_BOOTSTRAP_TOKEN")
+            .ok()
+            .filter(|token| !token.is_empty())
     });
     let downstream = match (url, issue) {
         (None, None) => None,
@@ -676,7 +696,11 @@ fn paperclip_spike_command(
     };
     let mode = match plane {
         SpikePlaneArg::Stub => paperclip_spike::SpikeMode::Stub,
-        SpikePlaneArg::Real => paperclip_spike::SpikeMode::Real { bind, downstream },
+        SpikePlaneArg::Real => paperclip_spike::SpikeMode::Real {
+            bind,
+            downstream,
+            bootstrap_token,
+        },
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
