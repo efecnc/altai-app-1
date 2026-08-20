@@ -138,11 +138,11 @@ architecture, security, and replacement decision. “Study” does not count as 
 
 | Order | Track | Status | Depends on | Required decision and outcome |
 | ---: | --- | --- | --- | --- |
-| 080 | Paperclip downstream/codebase | in_progress | 034, 060 | Organization-owned downstream; preserve license/history/base SHA; select modules through adapter boundaries |
-| 081 | LongHorizon codebase | planned | 035, 044 | Adopt long-running recovery/evaluation mechanisms only after conformance benchmark |
+| 080 | Paperclip downstream/codebase | accepted | 034, 060 | Real-plane acceptance ALT-7 passed; PR #833 (`6126a31b`) merged with all required CI green; downstream bridge `efecnc/paperclip#1` merged |
+| 081 | LongHorizon codebase | accepted (defer) | 035, 044 | Pinned-source discovery and `LH-081-recovery-evidence-v1` passed; direct adoption deferred because its local state/ownership would conflict with ALTAI authority |
 | 082 | Macro codebase | blocked: legal gate | 071 | License/provenance clearance before any Apache artifact; then isolate adopted modules |
-| 083 | OpenTag codebase | planned | 051, 071 | Normalize tag/metadata concepts without creating a second identity system |
-| 084 | qm codebase | planned | 045, 060 | Adopt quality/evaluation modules behind evidence and replay contracts |
+| 083 | OpenTag codebase | accepted (defer) | 051, 071 | Pinned-source conformance and safe ingress fixture passed; direct runtime/identity/lease adoption deferred to preserve ALTAI authority |
+| 084 | qm codebase | accepted (defer) | 045, 060 | Pinned-source decision (#840) and ALTAI-native `QM-084-evidence-replay-v1` (#842) passed; direct harness adoption remains deferred to preserve canonical authority |
 
 ### Stage 9 — Learning, collaboration and advanced clients
 
@@ -169,14 +169,11 @@ architecture, security, and replacement decision. “Study” does not count as 
 
 The next PRs are fixed until this list is updated by an accepted change:
 
-1. `CP-08-85` — End-to-end spike vs the real downstream plane (080 PR 6)
-   (Per `PAPERCLIP_SPIKE_PLAN.md` §4: run the `altai-cli paperclip-spike`
-   harness against the real downstream Paperclip plane with the
-   `altai-host` adapter wired to the protocol path — IsanAgent attempt
-   (034), event translation (035), Review projection with evidence (045).
-   Record the pass evidence in the downstream task record and the 080
-   acceptance row. The spike's pass is declared only when this harness run
-   is green against the real downstream.)
+1. `CP-08-92` — repository readiness and context-pack discovery (090 PR 1)
+   (Inventory the existing repository/context paths and define a bounded,
+   measured context-pack fixture. Canonical Work, Attempt, Evidence and
+   repository scope are referenced rather than copied; no new state owner or
+   workspace credential path may be introduced.)
 
 ## 5. Project-manager update protocol
 

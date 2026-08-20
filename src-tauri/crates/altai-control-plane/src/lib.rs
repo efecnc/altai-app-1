@@ -27,10 +27,12 @@ pub mod cron_due;
 pub mod delivery_gate;
 pub mod dispatch_eligibility;
 pub mod evidence_repository;
+pub mod evidence_replay;
 pub mod account_credentials;
 pub mod external_account_repository;
 pub mod external_object_repository;
 pub mod external_sync;
+pub mod opentag_adapter;
 pub mod execution_repository;
 pub mod legacy_work_bridge;
 pub mod liveness_monitor;
@@ -126,6 +128,10 @@ pub use external_sync::{
     content_hash, resolve_external_conflict, ExternalObjectProvider, ExternalSyncConflict,
     ExternalSyncError, ExternalSyncReport, ExternalSyncService, ProviderObject,
 };
+pub use opentag_adapter::{
+    normalize_opentag_event, NormalizedOpenTagEvent, OpenTagAdapterError,
+    OpenTagAdapterPolicy, OpenTagInboundEvent,
+};
 pub use routine_repository::{RoutineError, RoutineRepository, SqliteRoutineRepository};
 pub use run_binding_repository::{
     RunBindingError, RunBindingRepository, SqliteRunBindingRepository,
@@ -160,6 +166,10 @@ pub use budget_enforcer::BudgetEnforcer;
 pub use completion_gate::{CompletionBlocker, CompletionError, CompletionGate, CompletionOutcome};
 pub use delivery_gate::{DeliveryBlocker, DeliveryDecision, DeliveryError, DeliveryGate};
 pub use evidence_repository::{EvidenceError, EvidenceRepository, SqliteEvidenceRepository};
+pub use evidence_replay::{
+    EvidenceReplayActivity, EvidenceReplayArtifact, EvidenceReplayError, EvidenceReplayInput,
+    QM_084_EVIDENCE_REPLAY_SCHEMA_VERSION,
+};
 pub use work_graph_repository::{InMemoryWorkGraphRepository, WorkGraphError, WorkGraphRepository};
 pub use workspace_scope_gate::{
     DenialReason, ScopePermit, WorkspaceScopeError, WorkspaceScopeGate,
