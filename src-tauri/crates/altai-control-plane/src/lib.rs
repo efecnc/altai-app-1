@@ -29,6 +29,7 @@ pub mod dispatch_eligibility;
 pub mod evidence_repository;
 pub mod evidence_replay;
 pub mod evaluation_projection;
+pub mod evaluation_summary;
 pub mod account_credentials;
 pub mod external_account_repository;
 pub mod external_object_repository;
@@ -178,6 +179,10 @@ pub use evidence_replay::{
 pub use evaluation_projection::{
     EvaluationProjectionError, EvaluationReplayProjection,
     QM_084_EVALUATION_PROJECTION_SCHEMA_VERSION,
+};
+pub use evaluation_summary::{
+    CostEvidence, EvaluationAttemptSummary, EvaluationSummaryError, UsageMeterTotal,
+    QM_084_EVALUATION_ATTEMPT_SUMMARY_SCHEMA_VERSION,
 };
 pub use work_graph_repository::{InMemoryWorkGraphRepository, WorkGraphError, WorkGraphRepository};
 pub use workspace_scope_gate::{
