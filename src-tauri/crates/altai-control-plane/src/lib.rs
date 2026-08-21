@@ -47,6 +47,7 @@ pub mod repository_readiness;
 pub mod routine_cron_bridge;
 pub mod routine_materializer;
 pub mod routine_repository;
+pub mod routing_recommendation;
 pub mod run_binding_repository;
 pub mod run_context;
 pub mod schedule_backend_repository;
@@ -139,6 +140,10 @@ pub use opentag_adapter::{
     OpenTagAdapterPolicy, OpenTagInboundEvent,
 };
 pub use routine_repository::{RoutineError, RoutineRepository, SqliteRoutineRepository};
+pub use routing_recommendation::{
+    RoutingBlocker, RoutingCandidate, RoutingCandidateView, RoutingRecommendation,
+    RoutingRecommendationError, ROUTING_RECOMMENDATION_SCHEMA_VERSION,
+};
 pub use run_binding_repository::{
     RunBindingError, RunBindingRepository, SqliteRunBindingRepository,
 };
