@@ -149,8 +149,8 @@ architecture, security, and replacement decision. “Study” does not count as 
 | Order | Package | Status | Depends on | Planned PRs | Acceptance gate |
 | ---: | --- | --- | --- | ---: | --- |
 | 090 | Repository readiness and context-pack builder | accepted | 031, 045 | #57 | Context is bounded/measured, repository access is explicitly permitted, and canonical state is referenced rather than copied |
-| 091 | Evaluation, replay and quality dashboard | in_progress | 045, 084 | 2–3 | Deterministic replay and comparable quality/cost evidence |
-| 092 | Smart routing and learning/playbooks | planned | 043, 091 | 2 | Routing is explainable, budget-aware and reversible |
+| 091 | Evaluation, replay and quality dashboard | accepted | 045, 084 | #60, #62, #63 | Deterministic replay and comparable quality/cost evidence |
+| 092 | Smart routing and learning/playbooks | in_progress | 043, 091 | 2 | Routing is explainable, budget-aware and reversible |
 | 093 | Remote workers and collaboration notifications | planned | 051, 052 | 2–3 | Credential broker, worker isolation, durable notification delivery |
 | 094 | CRDT/offline/mobile discovery and benchmark | planned | 051, 060 | 1 research PR | Measured need, conflict model, security and cost decision before implementation |
 | 095 | CRDT/offline/mobile implementation | blocked: discovery | 094 | 3+ | Only starts if 094 approves it; identity and authority remain server-compatible |

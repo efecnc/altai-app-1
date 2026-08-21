@@ -38,6 +38,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 | CP-08 (083) | accepted (defer) | PRs #837–#838 / `db806198` | 2026-08-20 | OpenTag source/provenance was evaluated and a verified-source ingress conformance fixture passed; direct runtime, identity, lease and ledger adoption was deferred so only canonical ALTAI authority can mutate Work, Attempt, Activity and Evidence |
 | CP-08 (084) | accepted (defer) | PRs #840–#842 / `75837305` | 2026-08-20 | qm provenance was pinned and direct harness adoption was deferred; the ALTAI-native replay fixture produces deterministic, scoped Evidence/Activity comparison input with fail-closed source validation and no external evaluator authority |
 | CP-08 (094) | accepted | fork PR #60 / `36a6fd98` | 2026-08-21 | A versioned, read-only evaluation replay projection exposes deterministic coverage counts and ordered evidence kinds while excluding references, raw correlations, scores and all mutation authority |
+| CP-08 (095–096) | accepted | fork PRs #62–#63 / `aefc24a0` | 2026-08-21 | The dashboard boundary accepts only exact-scope immutable Usage facts; the pure attempt summary groups checked meter totals and treats absent cost evidence as unavailable, without a price, score, storage, transport or mutation authority |
 
 ## Current Schema and Protocol Versions
 
@@ -66,7 +67,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 
 | Task ID | Risk | Depends on | Status |
 | --- | --- | --- | --- |
-| CP-08-95 | B | 045, 084, CP-08-94 | **in progress** — comparison evidence and dashboard boundary discovery (Package 091 PR 2) |
+| CP-08-97 | B | 043, 091 | **in progress** — smart-routing and learning boundary discovery (Package 092 PR 1) |
 
 ## Known Failing Tests / Blockers
 
