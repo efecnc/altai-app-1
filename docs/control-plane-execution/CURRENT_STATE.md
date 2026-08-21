@@ -65,7 +65,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 
 | Task ID | Risk | Depends on | Status |
 | --- | --- | --- | --- |
-| CP-08-92 | B | 031, 045, CP-08-91 | **in progress** — repository readiness and bounded context-pack discovery (Package 090 PR 1) |
+| CP-08-94 | B | 045, 084, CP-08-93 | **in progress** — deterministic evaluation/replay projection discovery (Package 091 PR 1) |
 
 ## Known Failing Tests / Blockers
 
