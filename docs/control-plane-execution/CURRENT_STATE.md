@@ -66,7 +66,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 
 | Task ID | Risk | Depends on | Status |
 | --- | --- | --- | --- |
-| CP-08-95 | B | 045, 084, CP-08-94 | **ready** — comparison evidence and dashboard boundary discovery (Package 091 PR 2) |
+| CP-08-95 | B | 045, 084, CP-08-94 | **in progress** — comparison evidence and dashboard boundary discovery (Package 091 PR 2) |
 
 ## Known Failing Tests / Blockers
 
