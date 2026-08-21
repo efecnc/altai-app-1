@@ -41,6 +41,7 @@ pub mod protocol_dispatch;
 pub mod recovery_repository;
 pub mod recovery_service;
 pub mod repository_scope_repository;
+pub mod repository_readiness;
 pub mod routine_cron_bridge;
 pub mod routine_materializer;
 pub mod routine_repository;
@@ -111,6 +112,9 @@ pub use recovery_repository::{RecoveryError, RecoveryRepository, SqliteRecoveryR
 pub use recovery_service::{RecoveryOutcome, RecoveryService, RecoveryServiceError};
 pub use repository_scope_repository::{
     RepositoryScopeError, RepositoryScopeRepository, SqliteRepositoryScopeRepository,
+};
+pub use repository_readiness::{
+    RepositoryReadinessError, RepositoryReadinessManifest, REPOSITORY_READINESS_SCHEMA_VERSION,
 };
 pub use routine_cron_bridge::{RoutineCronBridge, DEFAULT_CRON_TICK};
 pub use routine_materializer::{RoutineMaterializationError, RoutineMaterializer};
