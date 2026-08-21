@@ -28,6 +28,7 @@ pub mod delivery_gate;
 pub mod dispatch_eligibility;
 pub mod evidence_repository;
 pub mod evidence_replay;
+pub mod evaluation_projection;
 pub mod account_credentials;
 pub mod external_account_repository;
 pub mod external_object_repository;
@@ -173,6 +174,10 @@ pub use evidence_repository::{EvidenceError, EvidenceRepository, SqliteEvidenceR
 pub use evidence_replay::{
     EvidenceReplayActivity, EvidenceReplayArtifact, EvidenceReplayError, EvidenceReplayInput,
     QM_084_EVIDENCE_REPLAY_SCHEMA_VERSION,
+};
+pub use evaluation_projection::{
+    EvaluationProjectionError, EvaluationReplayProjection,
+    QM_084_EVALUATION_PROJECTION_SCHEMA_VERSION,
 };
 pub use work_graph_repository::{InMemoryWorkGraphRepository, WorkGraphError, WorkGraphRepository};
 pub use workspace_scope_gate::{
