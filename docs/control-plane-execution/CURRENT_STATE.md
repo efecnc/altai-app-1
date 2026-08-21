@@ -3,9 +3,9 @@
 > **Rule:** This file is updated **only** when a task is accepted (merged/reviewed),
 > not when an agent says it finished. It records canonical progress.
 >
-> **Date:** 2026-08-16
+> **Date:** 2026-08-20
 >
-> **Last updated by:** Full Gmail multi-account adapter through PRs #825–#827
+> **Last updated by:** Paperclip real-plane acceptance through PR #833
 
 ## Accepted Tasks
 
@@ -33,6 +33,10 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 | CP-08 (072) | accepted | PRs #815–#818, #820 | 2026-08-16 | Out-of-process plugin workers: supervised crash-isolated child processes over stdio IPC, health probing with restart budgets, at-most-once job and webhook dispatch ledgers, and per-process scoped-secret hand-off re-provisioned across restarts |
 | CP-08 (073) | accepted | PRs #822–#823 | 2026-08-16 | Schema-driven plugin UI: declarative surface/action contract (Section/Text/Table/Action, bounded) validated at registration with the same first-error order on both sides, and runtime dispatch where the installed declaration is the whitelist — invoke_ui_action re-checks the capability at the dispatch boundary and rides the at-most-once ledger, so the UI cannot bypass worker capability checks |
 | CP-08 (074) | accepted | PRs #825–#827 | 2026-08-16 | Full Gmail multi-account adapter: account model with per-account identity and a (plugin, account, name)-scoped credential store, an account-scoped sync engine where every object carries the account and the watermark is the account's alone, and the live wiring — Gmail client over the SSRF-safe transport, connect/list/disconnect/sync commands, TS bindings — so account isolation, scoped credentials and idempotent thread/message sync hold end to end |
+| CP-08 (080) | accepted | PR #833 / `6126a31b` | 2026-08-20 | Paperclip downstream charter and adapter boundary delivered; the real ALT-7 plane reached `in_review` with exactly one attributed `altai` work product, and required upstream CI (including Linux/macOS/Windows Rust and CLI smoke) succeeded |
+| CP-08 (081) | accepted (defer) | PRs #834–#835 / `904b05bc` | 2026-08-20 | LongHorizon source/provenance and a recovery/evidence benchmark were evaluated; `LH-081-recovery-evidence-v1` passed without an external runtime, while direct code adoption was deferred to preserve canonical ALTAI Work, Attempt, lease, Activity and Evidence ownership |
+| CP-08 (083) | accepted (defer) | PRs #837–#838 / `db806198` | 2026-08-20 | OpenTag source/provenance was evaluated and a verified-source ingress conformance fixture passed; direct runtime, identity, lease and ledger adoption was deferred so only canonical ALTAI authority can mutate Work, Attempt, Activity and Evidence |
+| CP-08 (084) | accepted (defer) | PRs #840–#842 / `75837305` | 2026-08-20 | qm provenance was pinned and direct harness adoption was deferred; the ALTAI-native replay fixture produces deterministic, scoped Evidence/Activity comparison input with fail-closed source validation and no external evaluator authority |
 
 ## Current Schema and Protocol Versions
 
@@ -61,9 +65,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 
 | Task ID | Risk | Depends on | Status |
 | --- | --- | --- | --- |
-| CP-08-36 | B | CP-08-35 | **in progress** — Public versioned control protocol contracts and capability negotiation (Package 051 PR 1) |
-| CP-08-37 | B | CP-08-36 | ready next — Protocol dispatcher and cross-transport conformance tests (Package 051 PR 2) |
-| CP-08-38 | C | CP-08-37 | planned — Local migration runner and semantic lifecycle for `work.db` (Package 052) |
+| CP-08-92 | B | 031, 045, CP-08-91 | **in progress** — repository readiness and bounded context-pack discovery (Package 090 PR 1) |
 
 ## Known Failing Tests / Blockers
 

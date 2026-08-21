@@ -33,10 +33,14 @@ use altai_control_plane::{
     SqliteAttemptRepository, SqliteControlEventRepository, SqliteRoutineRepository,
     SqliteRunBindingRepository, WorkGraphRepository,
 };
+#[cfg(test)]
+use altai_control_plane::{EvidenceRepository, SqliteEvidenceRepository};
 use altai_control_protocol::{
     ActivityEvent, Actor, AgentInstanceId, AgentProfileRevisionId, Attempt, AttemptId,
     AttemptState, EventKind, OrganizationId, RunId, WorkItemId,
 };
+#[cfg(test)]
+use altai_control_protocol::{Evidence, EvidenceId};
 use axum::{
     body::Body,
     http::{header::AUTHORIZATION, Method, Request, StatusCode},
@@ -161,6 +165,8 @@ struct Plane {
     work_graph: Arc<InMemoryWorkGraphRepository>,
     attempts: Arc<SqliteAttemptRepository>,
     activity: Arc<SqliteActivityEventRepository>,
+    #[cfg(test)]
+    evidence: Arc<SqliteEvidenceRepository>,
 }
 
 fn build_plane(
@@ -193,6 +199,12 @@ fn build_plane(
     let attempts = Arc::new(
         SqliteAttemptRepository::open(&sqlite("attempts.db")).map_err(|error| {
             SpikeFailure::new(SpikePhase::Health, "attempts-db", error.to_string())
+        })?,
+    );
+    #[cfg(test)]
+    let evidence = Arc::new(
+        SqliteEvidenceRepository::open(&sqlite("evidence.db")).map_err(|error| {
+            SpikeFailure::new(SpikePhase::Health, "evidence-db", error.to_string())
         })?,
     );
     let app = router_with_control_repositories(
@@ -230,6 +242,8 @@ fn build_plane(
         work_graph,
         attempts,
         activity,
+        #[cfg(test)]
+        evidence,
     })
 }
 
@@ -1436,6 +1450,375 @@ mod tests {
         )
         .await
         .expect("scenario over real HTTP plane");
+    }
+
+    /// CP-08-87 / LH-081-recovery-evidence-v1. The simulated interruption is
+    /// deliberately after `Started` and before finalization; reattachment
+    /// rides the production registration and checkout wire, so this is not a
+    /// second runtime or source of lease/attempt authority.
+    #[tokio::test]
+    async fn recovery_evidence_benchmark_keeps_one_attempt_and_auditable_trace() {
+        let dir = tempfile::tempdir().expect("benchmark tempdir");
+        let plane =
+            build_plane(dir.path(), Some("lh-081-benchmark-token")).expect("benchmark plane");
+        let token = plane.bootstrap_token.clone();
+        let wire = Wire::Oneshot {
+            app: plane.app.clone(),
+        };
+
+        let (status, health) = wire
+            .call(Method::GET, "/v1/health", Some(&token), None)
+            .await
+            .expect("health");
+        assert_eq!(status, StatusCode::OK);
+        let protocol_major = health["protocol_major"].as_u64().expect("protocol major") as u16;
+        let agent = AgentInstanceId::new("ai_lh_081_host");
+        let (status, grant_body) = wire
+            .call(Method::POST, "/v1/registration-grants", Some(&token), None)
+            .await
+            .expect("initial grant");
+        assert_eq!(status, StatusCode::OK);
+        let grant = grant_body["token"].as_str().expect("grant token");
+        let (status, _) = wire
+            .call(
+                Method::POST,
+                "/v1/hosts/register",
+                None,
+                Some(host_registration(&agent, grant, protocol_major)),
+            )
+            .await
+            .expect("initial registration");
+        assert_eq!(status, StatusCode::OK);
+
+        let work_item = WorkItemId::new("wi_lh_081_recovery");
+        plane
+            .work_graph
+            .register_work_item(work_item.clone())
+            .expect("seed work");
+        let (status, _) = wire
+            .call(
+                Method::POST,
+                "/v1/wakes",
+                Some(&token),
+                Some(json!({
+                    "work_item_id": work_item.to_json_value(),
+                    "source": "manual",
+                    "requested_at": "2026-08-20T11:10:00Z",
+                })),
+            )
+            .await
+            .expect("enqueue");
+        assert_eq!(status, StatusCode::OK);
+        let claim_uri = format!("/v1/wakes/{}/claim", work_item.value);
+        let (status, _) = wire
+            .call(
+                Method::POST,
+                &claim_uri,
+                Some(&token),
+                Some(json!({ "claimed_at": "2026-08-20T11:10:01Z" })),
+            )
+            .await
+            .expect("claim");
+        assert_eq!(status, StatusCode::OK);
+
+        let attempt = AttemptId::new("att_lh_081_recovery");
+        let lease = json!({
+            "lease": {
+                "work_item_id": work_item.to_json_value(),
+                "owner_agent_instance_id": agent.to_json_value(),
+                "attempt_id": attempt.to_json_value(),
+                "expires_at_unix_seconds": 4_102_444_800u64,
+            },
+            "now_unix_seconds": 1_786_100_000u64,
+        });
+        let (status, _) = wire
+            .call(
+                Method::POST,
+                "/v1/work-checkouts",
+                Some(&token),
+                Some(lease.clone()),
+            )
+            .await
+            .expect("checkout");
+        assert_eq!(status, StatusCode::CREATED);
+        plane
+            .attempts
+            .create(Attempt {
+                id: attempt.clone(),
+                work_item_id: work_item.clone(),
+                owner_agent_instance_id: agent.clone(),
+                profile_revision_id: AgentProfileRevisionId::new("lh-081"),
+                state: AttemptState::Created,
+                created_at_unix_seconds: 1_786_100_010,
+                updated_at_unix_seconds: 1_786_100_010,
+            })
+            .expect("create canonical attempt");
+        let run_id = RunId::new("run_lh_081_recovery");
+        let (status, _) = wire
+            .call(
+                Method::POST,
+                "/v1/runtime/run-bindings",
+                Some(&token),
+                Some(json!({
+                    "attempt_id": attempt.to_json_value(),
+                    "work_item_id": work_item.to_json_value(),
+                    "owner_agent_instance_id": agent.to_json_value(),
+                    "run_id": run_id.to_json_value(),
+                    "bound_at_unix_seconds": 1_786_100_020u64,
+                })),
+            )
+            .await
+            .expect("bind run");
+        assert_eq!(status, StatusCode::OK);
+        for (state, now) in [
+            (AttemptState::Claimed, 1_786_100_030),
+            (AttemptState::Dispatched, 1_786_100_040),
+            (AttemptState::Running, 1_786_100_050),
+        ] {
+            plane
+                .attempts
+                .transition(&attempt, state, now)
+                .expect("advance attempt");
+        }
+
+        let organization = OrganizationId::new("lh-081");
+        let started = map_lifecycle_to_event(&RunLifecycleEvent::Started {
+            run_id: run_id.value.clone(),
+            chat_id: format!("chat_{attempt}"),
+        });
+        plane
+            .activity
+            .append(ActivityEvent {
+                event_id: "evt_lh_081_started".into(),
+                kind: EventKind::AttemptTransitioned,
+                actor: Actor::System {
+                    component: "lh-081-benchmark".into(),
+                },
+                timestamp: "2026-08-20T11:10:05Z".into(),
+                organization_id: organization.clone(),
+                project_id: None,
+                work_item_id: Some(work_item.clone()),
+                attempt_id: Some(attempt.clone()),
+                summary: format!("{started:?}"),
+                correlation_id: Some(run_id.value.clone()),
+                causation_id: None,
+            })
+            .expect("started activity");
+        assert_eq!(
+            plane
+                .attempts
+                .list_in_state(AttemptState::Running)
+                .expect("running attempts"),
+            vec![plane
+                .attempts
+                .get(&attempt)
+                .expect("read attempt")
+                .expect("attempt exists")]
+        );
+
+        // Fresh registration is the recovery boundary. It may observe the
+        // existing state, but cannot duplicate the wake or lease.
+        let (status, recovery_grant_body) = wire
+            .call(Method::POST, "/v1/registration-grants", Some(&token), None)
+            .await
+            .expect("recovery grant");
+        assert_eq!(status, StatusCode::OK);
+        let recovery_grant = recovery_grant_body["token"]
+            .as_str()
+            .expect("recovery grant");
+        let (status, _) = wire
+            .call(
+                Method::POST,
+                "/v1/hosts/register",
+                None,
+                Some(host_registration(&agent, recovery_grant, protocol_major)),
+            )
+            .await
+            .expect("recovery registration");
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = wire
+            .call(
+                Method::POST,
+                &claim_uri,
+                Some(&token),
+                Some(json!({ "claimed_at": "2026-08-20T11:10:06Z" })),
+            )
+            .await
+            .expect("reclaim");
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "recovery must not duplicate the wake"
+        );
+        let (status, _) = wire
+            .call(
+                Method::POST,
+                "/v1/work-checkouts",
+                Some(&token),
+                Some(lease.clone()),
+            )
+            .await
+            .expect("recheckout");
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "recovery must retain the original lease"
+        );
+        let (status, _) = wire
+            .call(
+                Method::POST,
+                "/v1/work-checkouts",
+                Some(&token),
+                Some(json!({
+                    "lease": {
+                        "work_item_id": work_item.to_json_value(),
+                        "owner_agent_instance_id": AgentInstanceId::new("ai_lh_081_rival").to_json_value(),
+                        "attempt_id": AttemptId::new("att_lh_081_rival").to_json_value(),
+                        "expires_at_unix_seconds": 4_102_444_800u64,
+                    },
+                    "now_unix_seconds": 1_786_100_070u64,
+                })),
+            )
+            .await
+            .expect("rival checkout");
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a rival cannot steal the lease"
+        );
+        assert_eq!(
+            plane
+                .attempts
+                .list_in_state(AttemptState::Running)
+                .expect("running attempt after reattach")
+                .into_iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![attempt.clone()],
+            "reattachment must not create a second running attempt"
+        );
+
+        let terminated = map_lifecycle_to_event(&RunLifecycleEvent::Terminated {
+            run_id: run_id.value.clone(),
+            chat_id: format!("chat_{attempt}"),
+            outcome: RunOutcome::Completed,
+        });
+        plane
+            .activity
+            .append(ActivityEvent {
+                event_id: "evt_lh_081_terminated".into(),
+                kind: EventKind::AttemptTransitioned,
+                actor: Actor::System {
+                    component: "lh-081-benchmark".into(),
+                },
+                timestamp: "2026-08-20T11:10:07Z".into(),
+                organization_id: organization.clone(),
+                project_id: None,
+                work_item_id: Some(work_item.clone()),
+                attempt_id: Some(attempt.clone()),
+                summary: format!("{terminated:?}"),
+                correlation_id: Some(run_id.value.clone()),
+                causation_id: None,
+            })
+            .expect("terminated activity");
+        let finalize_uri = format!("/v1/runtime/attempts/{}/finalize", attempt.value);
+        let finalization = json!({
+            "outcome": "succeeded",
+            "observed_at_unix_seconds": 1_786_100_080u64,
+        });
+        let (status, body) = wire
+            .call(
+                Method::POST,
+                &finalize_uri,
+                Some(&token),
+                Some(finalization.clone()),
+            )
+            .await
+            .expect("finalize after recovery");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["state"].as_str(), Some("succeeded"));
+        let (status, replay) = wire
+            .call(
+                Method::POST,
+                &finalize_uri,
+                Some(&token),
+                Some(finalization),
+            )
+            .await
+            .expect("replay finalization");
+        assert_eq!(status, StatusCode::OK, "same finalization is idempotent");
+        assert_eq!(replay["state"].as_str(), Some("succeeded"));
+
+        let query = json!({
+            "id": "lh-081-query",
+            "version": { "major": protocol_major, "minor": 0 },
+            "actor": { "kind": "system", "component": "lh-081-benchmark" },
+            "payload": {
+                "type": "query_activity",
+                "payload": {
+                    "organization_id": organization.to_json_value(),
+                    "page": { "cursor": null, "limit": 50 },
+                    "kind": null,
+                    "work_item_id": work_item.to_json_value(),
+                },
+            },
+        });
+        let (status, body) = wire
+            .call(
+                Method::POST,
+                "/v1/protocol/commands",
+                Some(&token),
+                Some(query),
+            )
+            .await
+            .expect("query activity");
+        assert_eq!(status, StatusCode::OK);
+        let correlated = body["result"]["Ok"]["payload"]["items"]
+            .as_array()
+            .expect("activity items")
+            .iter()
+            .filter(|item| item["correlation_id"] == json!(run_id.value))
+            .count();
+        assert_eq!(
+            correlated, 2,
+            "exactly Started and Terminated are queryable"
+        );
+
+        let evidence = Evidence {
+            id: EvidenceId::new("ev_lh_081_recovery"),
+            organization_id: organization,
+            work_item_id: work_item.clone(),
+            attempt_id: attempt.clone(),
+            kind: "recovery_evidence_benchmark".into(),
+            reference: "LH-081-recovery-evidence-v1: interrupted-after-started; reattached; finalized-succeeded".into(),
+            created_at_unix_seconds: 1_786_100_090,
+        };
+        assert_eq!(
+            plane
+                .evidence
+                .record(evidence.clone())
+                .expect("record evidence"),
+            evidence
+        );
+        assert_eq!(
+            plane
+                .evidence
+                .list_for_work(&work_item)
+                .expect("query evidence"),
+            vec![evidence],
+            "one immutable Evidence row belongs to the canonical Work/Attempt"
+        );
+        assert_eq!(
+            plane
+                .attempts
+                .list_in_state(AttemptState::Succeeded)
+                .expect("succeeded attempt")
+                .into_iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![attempt],
+            "finalization has one canonical terminal outcome"
+        );
     }
 
     #[test]
