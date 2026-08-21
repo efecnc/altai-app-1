@@ -37,6 +37,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 | CP-08 (081) | accepted (defer) | PRs #834–#835 / `904b05bc` | 2026-08-20 | LongHorizon source/provenance and a recovery/evidence benchmark were evaluated; `LH-081-recovery-evidence-v1` passed without an external runtime, while direct code adoption was deferred to preserve canonical ALTAI Work, Attempt, lease, Activity and Evidence ownership |
 | CP-08 (083) | accepted (defer) | PRs #837–#838 / `db806198` | 2026-08-20 | OpenTag source/provenance was evaluated and a verified-source ingress conformance fixture passed; direct runtime, identity, lease and ledger adoption was deferred so only canonical ALTAI authority can mutate Work, Attempt, Activity and Evidence |
 | CP-08 (084) | accepted (defer) | PRs #840–#842 / `75837305` | 2026-08-20 | qm provenance was pinned and direct harness adoption was deferred; the ALTAI-native replay fixture produces deterministic, scoped Evidence/Activity comparison input with fail-closed source validation and no external evaluator authority |
+| CP-08 (094) | accepted | fork PR #60 / `36a6fd98` | 2026-08-21 | A versioned, read-only evaluation replay projection exposes deterministic coverage counts and ordered evidence kinds while excluding references, raw correlations, scores and all mutation authority |
 
 ## Current Schema and Protocol Versions
 
@@ -65,7 +66,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 
 | Task ID | Risk | Depends on | Status |
 | --- | --- | --- | --- |
-| CP-08-94 | B | 045, 084, CP-08-93 | **in progress** — deterministic evaluation/replay projection discovery (Package 091 PR 1) |
+| CP-08-95 | B | 045, 084, CP-08-94 | **ready** — comparison evidence and dashboard boundary discovery (Package 091 PR 2) |
 
 ## Known Failing Tests / Blockers
 
