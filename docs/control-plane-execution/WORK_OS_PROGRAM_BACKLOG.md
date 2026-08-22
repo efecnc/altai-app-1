@@ -151,7 +151,7 @@ architecture, security, and replacement decision. “Study” does not count as 
 | 090 | Repository readiness and context-pack builder | accepted | 031, 045 | #57 | Context is bounded/measured, repository access is explicitly permitted, and canonical state is referenced rather than copied |
 | 091 | Evaluation, replay and quality dashboard | accepted | 045, 084 | #60, #62, #63 | Deterministic replay and comparable quality/cost evidence |
 | 092 | Smart routing and learning/playbooks | accepted | 043, 091 | #65, #66 | Routing is explainable, budget-aware and reversible |
-| 093 | Remote workers and collaboration notifications | in_progress | 051, 052 | 3 | Credential broker, worker isolation, durable notification delivery |
+| 093 | Remote workers and collaboration notifications | accepted | 051, 052 | #68, #70, #72 | Credential broker, worker isolation, durable notification delivery |
 | 094 | CRDT/offline/mobile discovery and benchmark | planned | 051, 060 | 1 research PR | Measured need, conflict model, security and cost decision before implementation |
 | 095 | CRDT/offline/mobile implementation | blocked: discovery | 094 | 3+ | Only starts if 094 approves it; identity and authority remain server-compatible |
 
@@ -169,11 +169,12 @@ architecture, security, and replacement decision. “Study” does not count as 
 
 The next PRs are fixed until this list is updated by an accepted change:
 
-1. `CP-08-92` — repository readiness and context-pack discovery (090 PR 1)
-   (Inventory the existing repository/context paths and define a bounded,
-   measured context-pack fixture. Canonical Work, Attempt, Evidence and
-   repository scope are referenced rather than copied; no new state owner or
-   workspace credential path may be introduced.)
+1. `CP-08-102` — CRDT/offline/mobile discovery and benchmark (094 research
+   PR)
+   (Measure the need against the existing local-first control plane, compare
+   conflict models, and produce the security and cost decision before any
+   implementation. Identity and authority remain server-compatible; no new
+   state owner or credential path.)
 
 ## 5. Project-manager update protocol
 
