@@ -39,6 +39,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 | CP-08 (084) | accepted (defer) | PRs #840–#842 / `75837305` | 2026-08-20 | qm provenance was pinned and direct harness adoption was deferred; the ALTAI-native replay fixture produces deterministic, scoped Evidence/Activity comparison input with fail-closed source validation and no external evaluator authority |
 | CP-08 (094) | accepted | fork PR #60 / `36a6fd98` | 2026-08-21 | A versioned, read-only evaluation replay projection exposes deterministic coverage counts and ordered evidence kinds while excluding references, raw correlations, scores and all mutation authority |
 | CP-08 (095–096) | accepted | fork PRs #62–#63 / `aefc24a0` | 2026-08-21 | The dashboard boundary accepts only exact-scope immutable Usage facts; the pure attempt summary groups checked meter totals and treats absent cost evidence as unavailable, without a price, score, storage, transport or mutation authority |
+| CP-08 (097–098) | accepted | fork PRs #65–#66 / `015adae0` | 2026-08-21 | Smart-routing is a pure, deterministic recommendation with explicit priority and visible hard blockers; it cannot select, claim or dispatch an executor |
 
 ## Current Schema and Protocol Versions
 
@@ -67,7 +68,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 
 | Task ID | Risk | Depends on | Status |
 | --- | --- | --- | --- |
-| CP-08-97 | B | 043, 091 | **in progress** — smart-routing and learning boundary discovery (Package 092 PR 1) |
+| CP-08-99 | B | 051, 052 | **in progress** — remote-worker credential and notification boundary discovery (Package 093 PR 1) |
 
 ## Known Failing Tests / Blockers
 
