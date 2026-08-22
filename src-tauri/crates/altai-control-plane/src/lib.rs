@@ -36,6 +36,7 @@ pub mod external_object_repository;
 pub mod external_sync;
 pub mod opentag_adapter;
 pub mod execution_repository;
+pub mod legacy_import;
 pub mod legacy_work_bridge;
 pub mod liveness_monitor;
 pub mod local_migration;
@@ -106,6 +107,10 @@ pub use dispatch_eligibility::{
 pub use execution_repository::{
     ExecutionSnapshot, ExecutionSnapshotError, ExecutionSnapshotRepository,
     SqliteExecutionSnapshotRepository,
+};
+pub use legacy_import::{
+    LegacyImportAttribution, LegacyImportError, LegacyImportReport, LegacyImportRepository,
+    SqliteLegacyImportRepository,
 };
 pub use legacy_work_bridge::{LegacyWorkBridge, LegacyWorkBridgeError};
 pub use local_migration::{
