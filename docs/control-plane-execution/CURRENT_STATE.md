@@ -5,7 +5,7 @@
 >
 > **Date:** 2026-08-22
 >
-> **Last updated by:** Remote-worker notification durable store acceptance through PR #72
+> **Last updated by:** CRDT/offline/mobile discovery acceptance through PR #74
 
 ## Accepted Tasks
 
@@ -42,6 +42,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 | CP-08 (097–098) | accepted | fork PRs #65–#66 / `015adae0` | 2026-08-21 | Smart-routing is a pure, deterministic recommendation with explicit priority and visible hard blockers; it cannot select, claim or dispatch an executor |
 | CP-08 (099–100) | accepted | fork PRs #68, #70 / `6c307c7e` | 2026-08-22 | Remote-worker notification boundary discovered and the transport-independent fixture delivered: attributed proposals are stored insert-only, worker self-reports never move delivery state, and Delivered is reachable only through a canonical acknowledgement; no credential issuance or Attempt path exists |
 | CP-08 (101) | accepted | fork PR #72 / `29908c14` | 2026-08-22 | The proposal ledger became durable in the local `work.db` (schema v4): proposals stay insert-only with immutable scope attribution, worker-sourced claims remain scope-contained provenance that cannot move delivery state, and Delivered is reachable only through the canonical acknowledgement — completing package 093's credential broker / worker isolation / durable delivery exit gate |
+| CP-08 (102) | accepted | fork PR #74 / `9c03105e` | 2026-08-22 | Package 094's gate decision recorded: no-go on CRDT adoption — single-writer-per-workspace is codified policy, planned mobile/web surfaces are online monitors needing reconnection rather than merge, external-data conflicts already resolve through per-object authority, and peer-merge is incompatible with canonical-authority invariants; package 095 declined with explicit reopeners (`CRDT_OFFLINE_DISCOVERY.md`) |
 
 ## Current Schema and Protocol Versions
 
@@ -70,7 +71,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 
 | Task ID | Risk | Depends on | Status |
 | --- | --- | --- | --- |
-| CP-08-102 | B | 051, 060 | ready — CRDT/offline/mobile discovery and benchmark (Package 094 research PR) |
+| CP-08-103 | B | 052 | ready — legacy read-only importer boundary discovery (Package 100 PR 1) |
 
 ## Known Failing Tests / Blockers
 
