@@ -39,6 +39,7 @@ pub mod execution_repository;
 pub mod legacy_work_bridge;
 pub mod liveness_monitor;
 pub mod local_migration;
+pub mod notification_repository;
 pub mod protocol_dispatch;
 pub mod recovery_repository;
 pub mod recovery_service;
@@ -119,6 +120,9 @@ pub use remote_worker_notification::{
     NotificationProposalLedger, NotificationProposalRecord, NotificationScope,
     RemoteWorkerIdentity, RemoteWorkerNotificationError, WorkerDeliveryClaim,
     REMOTE_WORKER_NOTIFICATION_SCHEMA_VERSION,
+};
+pub use notification_repository::{
+    NotificationProposalRepository, SqliteNotificationProposalRepository,
 };
 pub use repository_scope_repository::{
     RepositoryScopeError, RepositoryScopeRepository, SqliteRepositoryScopeRepository,

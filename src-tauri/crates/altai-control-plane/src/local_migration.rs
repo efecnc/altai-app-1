@@ -9,10 +9,10 @@ use crate::{
     SqliteAgentRepository, SqliteApprovalRepository, SqliteAttemptRepository,
     SqliteBudgetRepository, SqliteEvidenceRepository, SqliteExecutionSnapshotRepository,
     SqliteExternalAccountRepository, SqliteExternalObjectRepository,
-    SqliteRecoveryRepository, SqliteRegistrationRepository, SqliteRepositoryScopeRepository,
-    SqliteRoutineRepository, SqliteRunBindingRepository, SqliteScheduleBackendRepository,
-    SqliteScopeRepository, SqliteUsageRepository, SqliteWakeRepository, SqliteWorkGraphRepository,
-    SqliteWorkItemRepository,
+    SqliteNotificationProposalRepository, SqliteRecoveryRepository, SqliteRegistrationRepository,
+    SqliteRepositoryScopeRepository, SqliteRoutineRepository, SqliteRunBindingRepository,
+    SqliteScheduleBackendRepository, SqliteScopeRepository, SqliteUsageRepository,
+    SqliteWakeRepository, SqliteWorkGraphRepository, SqliteWorkItemRepository,
 };
 use altai_core::WorkStore;
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
@@ -20,7 +20,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The semantic lifecycle version of the complete local `work.db` topology.
-pub const LOCAL_WORK_DB_SCHEMA_VERSION: i64 = 3;
+pub const LOCAL_WORK_DB_SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalMigrationReport {
@@ -146,6 +146,7 @@ impl LocalMigrationRunner {
         SqliteRecoveryRepository::open(database).map_err(repository_error)?;
         SqliteRepositoryScopeRepository::open(database).map_err(repository_error)?;
         SqliteRegistrationRepository::open(database).map_err(repository_error)?;
+        SqliteNotificationProposalRepository::open(database).map_err(repository_error)?;
 
         let mut connection = Connection::open(database).map_err(database_error)?;
         connection
@@ -217,6 +218,8 @@ mod tests {
             "control_plane_recovery_records",
             "control_plane_registered_hosts",
             "control_plane_external_objects",
+            "control_plane_notification_proposals",
+            "control_plane_worker_delivery_claims",
         ] {
             let exists: i64 = connection
                 .query_row(

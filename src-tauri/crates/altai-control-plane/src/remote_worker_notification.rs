@@ -107,6 +107,11 @@ pub enum RemoteWorkerNotificationError {
     Serialization {
         reason: String,
     },
+    /// The durable store hit a SQLite-level fault (open, statement, or
+    /// decode of stored state); the ledger itself never produces this.
+    Database {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for RemoteWorkerNotificationError {
@@ -137,10 +142,48 @@ impl std::fmt::Display for RemoteWorkerNotificationError {
                     "remote-worker notification serialization failed: {reason}"
                 )
             }
+            Self::Database { reason } => {
+                write!(f, "remote-worker notification store failed: {reason}")
+            }
         }
     }
 }
 impl std::error::Error for RemoteWorkerNotificationError {}
+
+/// Shared field validation and payload bounding for both the pure ledger and
+/// the durable store: an unattributed, unserializable, or oversized proposal
+/// is rejected before any storage layer — in-memory or SQLite — ever sees it.
+/// Returns the serialized payload size on success.
+pub(crate) fn validated_payload(
+    proposal: &NotificationProposal,
+) -> Result<usize, RemoteWorkerNotificationError> {
+    if proposal.delivery_id.is_empty() {
+        return Err(RemoteWorkerNotificationError::InvalidProposal {
+            reason: "delivery_id is blank".to_string(),
+        });
+    }
+    if proposal.event_kind.trim().is_empty() {
+        return Err(RemoteWorkerNotificationError::InvalidProposal {
+            reason: "event_kind is blank".to_string(),
+        });
+    }
+    if proposal.worker.plugin_id.value.is_empty() || proposal.worker.account_id.value.is_empty() {
+        return Err(RemoteWorkerNotificationError::InvalidProposal {
+            reason: "worker identity is incomplete".to_string(),
+        });
+    }
+    let payload_bytes = serde_json::to_vec(&proposal.payload).map_err(|error| {
+        RemoteWorkerNotificationError::Serialization {
+            reason: error.to_string(),
+        }
+    })?;
+    if payload_bytes.len() > MAX_PROPOSAL_PAYLOAD_BYTES {
+        return Err(RemoteWorkerNotificationError::UnboundedPayload {
+            delivery_id: proposal.delivery_id.clone(),
+        });
+    }
+    Ok(payload_bytes.len())
+}
 
 /// Pure, insertion-ordered proposal ledger for one org/workspace scope.
 /// Records are keyed by `delivery_id` and iterated in lexicographic order, so
@@ -170,32 +213,9 @@ impl NotificationProposalLedger {
         proposal: NotificationProposal,
     ) -> Result<NotificationProposalRecord, RemoteWorkerNotificationError> {
         let delivery_id = proposal.delivery_id.clone();
-        if delivery_id.is_empty() {
-            return Err(RemoteWorkerNotificationError::InvalidProposal {
-                reason: "delivery_id is blank".to_string(),
-            });
-        }
-        if proposal.event_kind.trim().is_empty() {
-            return Err(RemoteWorkerNotificationError::InvalidProposal {
-                reason: "event_kind is blank".to_string(),
-            });
-        }
-        if proposal.worker.plugin_id.value.is_empty() || proposal.worker.account_id.value.is_empty()
-        {
-            return Err(RemoteWorkerNotificationError::InvalidProposal {
-                reason: "worker identity is incomplete".to_string(),
-            });
-        }
+        validated_payload(&proposal)?;
         if proposal.scope != self.scope {
             return Err(RemoteWorkerNotificationError::ForeignScope { delivery_id });
-        }
-        let payload_bytes = serde_json::to_vec(&proposal.payload).map_err(|error| {
-            RemoteWorkerNotificationError::Serialization {
-                reason: error.to_string(),
-            }
-        })?;
-        if payload_bytes.len() > MAX_PROPOSAL_PAYLOAD_BYTES {
-            return Err(RemoteWorkerNotificationError::UnboundedPayload { delivery_id });
         }
 
         let record = NotificationProposalRecord {
@@ -335,6 +355,17 @@ mod tests {
                 delivery_id: "dlv_foreign".to_string(),
             })
         );
+        assert_eq!(ledger.records().count(), 0);
+        // Validation deliberately precedes scope checking, so a foreign-scope
+        // proposal with an oversized payload reports the payload fault. This
+        // pins that order so a refactor cannot silently swap it.
+        let mut bloated_foreign = proposal("dlv_bloated_foreign");
+        bloated_foreign.scope.workspace_id = WorkspaceId::new("ws_other");
+        bloated_foreign.payload = json!({ "blob": "x".repeat(MAX_PROPOSAL_PAYLOAD_BYTES + 1) });
+        assert!(matches!(
+            ledger.propose(bloated_foreign),
+            Err(RemoteWorkerNotificationError::UnboundedPayload { .. })
+        ));
         assert_eq!(ledger.records().count(), 0);
     }
 
