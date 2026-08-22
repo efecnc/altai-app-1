@@ -21,6 +21,12 @@ public static class AltaiGuiSmokeNative {
   public static extern bool IsWindowVisible(IntPtr hWnd);
 
   [DllImport("user32.dll", SetLastError = true)]
+  public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+  [DllImport("user32.dll", SetLastError = true)]
+  public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
+
+  [DllImport("user32.dll", SetLastError = true)]
   public static extern bool PostMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
 }
 "@
@@ -71,30 +77,58 @@ try {
     throw "ALTAI window has invalid bounds: ${width}x${height}."
   }
 
+  # GitHub's Windows runner keeps the shell terminal in the foreground. A
+  # visible ALTAI HWND can therefore be fully occluded even after the renderer
+  # checkpoint, causing CopyFromScreen to capture the terminal instead. Raise
+  # ALTAI only for the capture, then remove the topmost flag below.
+  $HWND_TOPMOST = [IntPtr](-1)
+  $HWND_NOTOPMOST = [IntPtr](-2)
+  $SWP_NOSIZE = 0x0001
+  $SWP_NOMOVE = 0x0002
+  $SWP_SHOWWINDOW = 0x0040
+  $positionFlags = $SWP_NOSIZE -bor $SWP_NOMOVE -bor $SWP_SHOWWINDOW
+  if (-not [AltaiGuiSmokeNative]::SetWindowPos($handle, $HWND_TOPMOST, 0, 0, 0, 0, $positionFlags)) {
+    throw "Could not raise the ALTAI window for its GUI smoke capture."
+  }
+  [void][AltaiGuiSmokeNative]::SetForegroundWindow($handle)
+
   Add-Type -AssemblyName System.Drawing
-  Start-Sleep -Milliseconds 750
-  $bitmap = New-Object System.Drawing.Bitmap($width, $height)
-  $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+  $colors = $null
+  $paintDeadline = [DateTime]::UtcNow.AddSeconds(15)
   try {
-    $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
-    $bitmap.Save($ScreenshotPath, [System.Drawing.Imaging.ImageFormat]::Png)
-    # Sample the real application viewport. A blank WebView2 compositor is
-    # essentially one color; ALTAI's committed shell contains borders, labels,
-    # panels, and controls even on the welcome screen.
-    $colors = New-Object 'System.Collections.Generic.HashSet[string]'
-    for ($x = 24; $x -lt $width - 24; $x += 32) {
-      for ($y = 72; $y -lt $height - 24; $y += 32) {
-        $pixel = $bitmap.GetPixel($x, $y)
-        $bucket = '{0},{1},{2}' -f ([Math]::Floor($pixel.R / 8)), ([Math]::Floor($pixel.G / 8)), ([Math]::Floor($pixel.B / 8))
-        [void]$colors.Add($bucket)
+    do {
+      # The React checkpoint precedes WebView2's asynchronous compositor by a
+      # small, runner-dependent interval. Preserve the latest attempt as the
+      # failure artifact while polling for an actually painted frame.
+      Start-Sleep -Milliseconds 500
+      $bitmap = New-Object System.Drawing.Bitmap($width, $height)
+      $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+      try {
+        $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+        $bitmap.Save($ScreenshotPath, [System.Drawing.Imaging.ImageFormat]::Png)
+        # Sample the painted shell, including app-owned Windows chrome. A blank
+        # WebView2 compositor is essentially one color. The no-project Home
+        # empty state is a sparse light canvas under a light OS theme, so keep
+        # this grid in sync with `src/lib/guiSmokeColorBuckets.ts`.
+        $colors = New-Object 'System.Collections.Generic.HashSet[string]'
+        for ($x = 16; $x -lt $width - 16; $x += 16) {
+          for ($y = 16; $y -lt $height - 16; $y += 16) {
+            $pixel = $bitmap.GetPixel($x, $y)
+            $bucket = '{0},{1},{2}' -f ([Math]::Floor($pixel.R / 8)), ([Math]::Floor($pixel.G / 8)), ([Math]::Floor($pixel.B / 8))
+            [void]$colors.Add($bucket)
+          }
+        }
+      } finally {
+        $graphics.Dispose()
+        $bitmap.Dispose()
       }
-    }
+    } while ($colors.Count -lt 6 -and [DateTime]::UtcNow -lt $paintDeadline)
+
     if ($colors.Count -lt 6) {
       throw "WebView2 did not paint the real ALTAI shell; viewport contained only $($colors.Count) sampled color buckets."
     }
   } finally {
-    $graphics.Dispose()
-    $bitmap.Dispose()
+    [void][AltaiGuiSmokeNative]::SetWindowPos($handle, $HWND_NOTOPMOST, 0, 0, 0, 0, $positionFlags)
   }
 
   # WM_CLOSE exercises the native close path independently of the renderer.
