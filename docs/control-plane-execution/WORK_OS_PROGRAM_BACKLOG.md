@@ -159,7 +159,7 @@ architecture, security, and replacement decision. “Study” does not count as 
 
 | Order | Package | Status | Depends on | Planned PRs | Acceptance gate |
 | ---: | --- | --- | --- | ---: | --- |
-| 100 | Legacy read-only importers | planned | 052 | 2 | Assignment/todo/orchestration state imports idempotently |
+| 100 | Legacy read-only importers | in_progress | 052 | #76, 1 | Assignment/todo/orchestration state imports idempotently |
 | 101 | Per-workspace single-writer cutover | planned | 053, 060, 100 | 2 | No workspace has two authoritative mutation paths |
 | 102 | Legacy UI/store/menu deletion | planned | 061–067, 101 | 2–4 | Replacement parity and rollback evidence accepted before deletion |
 | 103 | Security, soak, chaos and performance gates | planned | all runtime stages | 3 | Recovery >99.9% target, cross-org leaks zero, bounded queue/graph performance |
@@ -169,11 +169,13 @@ architecture, security, and replacement decision. “Study” does not count as 
 
 The next PRs are fixed until this list is updated by an accepted change:
 
-1. `CP-08-103` — legacy read-only importer boundary discovery (100 PR 1)
-   (Inventory the legacy assignment/todo/orchestration state surfaces and
-   define the read-only, idempotent import boundary into canonical Work
-   items. No new state owner, credential path or mutation authority; the
-   legacy stores remain the source until cutover.)
+1. `CP-08-104` — read-only legacy import command implementation (100 PR 2)
+   (Build exactly one transport-independent import command against the
+   accepted boundary in `LEGACY_IMPORTER_DISCOVERY.md`: mapping-table
+   keyed idempotent projection of assignments and manual todos into
+   canonical Work items, closing the three named identity gaps in scope.
+   Read-only toward legacy stores; no status translation; no new state
+   owner or credential path.)
 
 ## 5. Project-manager update protocol
 

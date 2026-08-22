@@ -5,7 +5,7 @@
 >
 > **Date:** 2026-08-22
 >
-> **Last updated by:** CRDT/offline/mobile discovery acceptance through PR #74
+> **Last updated by:** Legacy importer boundary discovery acceptance through PR #76
 
 ## Accepted Tasks
 
@@ -43,6 +43,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 | CP-08 (099–100) | accepted | fork PRs #68, #70 / `6c307c7e` | 2026-08-22 | Remote-worker notification boundary discovered and the transport-independent fixture delivered: attributed proposals are stored insert-only, worker self-reports never move delivery state, and Delivered is reachable only through a canonical acknowledgement; no credential issuance or Attempt path exists |
 | CP-08 (101) | accepted | fork PR #72 / `29908c14` | 2026-08-22 | The proposal ledger became durable in the local `work.db` (schema v4): proposals stay insert-only with immutable scope attribution, worker-sourced claims remain scope-contained provenance that cannot move delivery state, and Delivered is reachable only through the canonical acknowledgement — completing package 093's credential broker / worker isolation / durable delivery exit gate |
 | CP-08 (102) | accepted | fork PR #74 / `9c03105e` | 2026-08-22 | Package 094's gate decision recorded: no-go on CRDT adoption — single-writer-per-workspace is codified policy, planned mobile/web surfaces are online monitors needing reconnection rather than merge, external-data conflicts already resolve through per-object authority, and peer-merge is incompatible with canonical-authority invariants; package 095 declined with explicit reopeners (`CRDT_OFFLINE_DISCOVERY.md`) |
+| CP-08 (103) | accepted | fork PR #76 / `7cfb9ee8` | 2026-08-22 | Legacy read-only importer boundary defined (`LEGACY_IMPORTER_DISCOVERY.md`): assignments are the primary source, manual todos join with named identity gaps PR 2 closes in scope, orchestration intents and IsanAgent-owned notifications are excluded with cited rationale; idempotency rides a dedicated mapping table on the fail-closed `legacy_work_bridge` pattern |
 
 ## Current Schema and Protocol Versions
 
@@ -71,7 +72,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 
 | Task ID | Risk | Depends on | Status |
 | --- | --- | --- | --- |
-| CP-08-103 | B | 052 | ready — legacy read-only importer boundary discovery (Package 100 PR 1) |
+| CP-08-104 | B | CP-08-103, 052 | **in progress** — read-only legacy import command implementation (Package 100 PR 2) |
 
 ## Known Failing Tests / Blockers
 
