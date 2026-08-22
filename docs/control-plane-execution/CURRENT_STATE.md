@@ -3,9 +3,9 @@
 > **Rule:** This file is updated **only** when a task is accepted (merged/reviewed),
 > not when an agent says it finished. It records canonical progress.
 >
-> **Date:** 2026-08-20
+> **Date:** 2026-08-22
 >
-> **Last updated by:** Paperclip real-plane acceptance through PR #833
+> **Last updated by:** Remote-worker notification fixture acceptance through PR #70
 
 ## Accepted Tasks
 
@@ -40,6 +40,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 | CP-08 (094) | accepted | fork PR #60 / `36a6fd98` | 2026-08-21 | A versioned, read-only evaluation replay projection exposes deterministic coverage counts and ordered evidence kinds while excluding references, raw correlations, scores and all mutation authority |
 | CP-08 (095–096) | accepted | fork PRs #62–#63 / `aefc24a0` | 2026-08-21 | The dashboard boundary accepts only exact-scope immutable Usage facts; the pure attempt summary groups checked meter totals and treats absent cost evidence as unavailable, without a price, score, storage, transport or mutation authority |
 | CP-08 (097–098) | accepted | fork PRs #65–#66 / `015adae0` | 2026-08-21 | Smart-routing is a pure, deterministic recommendation with explicit priority and visible hard blockers; it cannot select, claim or dispatch an executor |
+| CP-08 (099–100) | accepted | fork PRs #68, #70 / `6c307c7e` | 2026-08-22 | Remote-worker notification boundary discovered and the transport-independent fixture delivered: attributed proposals are stored insert-only, worker self-reports never move delivery state, and Delivered is reachable only through a canonical acknowledgement; no credential issuance or Attempt path exists |
 
 ## Current Schema and Protocol Versions
 
@@ -68,7 +69,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 
 | Task ID | Risk | Depends on | Status |
 | --- | --- | --- | --- |
-| CP-08-99 | B | 051, 052 | **in progress** — remote-worker credential and notification boundary discovery (Package 093 PR 1) |
+| CP-08-101 | B | 051, 052, CP-08-99, CP-08-100 | **in progress** — durable remote-worker notification store (Package 093 PR 3) |
 
 ## Known Failing Tests / Blockers
 
