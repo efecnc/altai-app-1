@@ -152,8 +152,8 @@ architecture, security, and replacement decision. “Study” does not count as 
 | 091 | Evaluation, replay and quality dashboard | accepted | 045, 084 | #60, #62, #63 | Deterministic replay and comparable quality/cost evidence |
 | 092 | Smart routing and learning/playbooks | accepted | 043, 091 | #65, #66 | Routing is explainable, budget-aware and reversible |
 | 093 | Remote workers and collaboration notifications | accepted | 051, 052 | #68, #70, #72 | Credential broker, worker isolation, durable notification delivery |
-| 094 | CRDT/offline/mobile discovery and benchmark | planned | 051, 060 | 1 research PR | Measured need, conflict model, security and cost decision before implementation |
-| 095 | CRDT/offline/mobile implementation | blocked: discovery | 094 | 3+ | Only starts if 094 approves it; identity and authority remain server-compatible |
+| 094 | CRDT/offline/mobile discovery and benchmark | accepted | 051, 060 | #74 | Measured need, conflict model, security and cost decision before implementation |
+| 095 | CRDT/offline/mobile implementation | declined (094 no-go) | 094 | 3+ | Only starts if 094 approves it; identity and authority remain server-compatible |
 
 ### Stage 10 — Migration, cutover and release
 
@@ -169,12 +169,11 @@ architecture, security, and replacement decision. “Study” does not count as 
 
 The next PRs are fixed until this list is updated by an accepted change:
 
-1. `CP-08-102` — CRDT/offline/mobile discovery and benchmark (094 research
-   PR)
-   (Measure the need against the existing local-first control plane, compare
-   conflict models, and produce the security and cost decision before any
-   implementation. Identity and authority remain server-compatible; no new
-   state owner or credential path.)
+1. `CP-08-103` — legacy read-only importer boundary discovery (100 PR 1)
+   (Inventory the legacy assignment/todo/orchestration state surfaces and
+   define the read-only, idempotent import boundary into canonical Work
+   items. No new state owner, credential path or mutation authority; the
+   legacy stores remain the source until cutover.)
 
 ## 5. Project-manager update protocol
 
