@@ -42,6 +42,7 @@ pub mod local_migration;
 pub mod protocol_dispatch;
 pub mod recovery_repository;
 pub mod recovery_service;
+pub mod remote_worker_notification;
 pub mod repository_scope_repository;
 pub mod repository_readiness;
 pub mod routine_cron_bridge;
@@ -113,6 +114,12 @@ pub use liveness_monitor::{LivenessError, LivenessMonitor};
 pub use protocol_dispatch::{ProtocolDispatcher, capabilities_from_wiring};
 pub use recovery_repository::{RecoveryError, RecoveryRepository, SqliteRecoveryRepository};
 pub use recovery_service::{RecoveryOutcome, RecoveryService, RecoveryServiceError};
+pub use remote_worker_notification::{
+    NotificationAcknowledgement, NotificationDeliveryState, NotificationProposal,
+    NotificationProposalLedger, NotificationProposalRecord, NotificationScope,
+    RemoteWorkerIdentity, RemoteWorkerNotificationError, WorkerDeliveryClaim,
+    REMOTE_WORKER_NOTIFICATION_SCHEMA_VERSION,
+};
 pub use repository_scope_repository::{
     RepositoryScopeError, RepositoryScopeRepository, SqliteRepositoryScopeRepository,
 };
