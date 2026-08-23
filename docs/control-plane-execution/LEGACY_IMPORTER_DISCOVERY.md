@@ -84,10 +84,12 @@ remains the eventual translation target when cutover lands
 - **G1 — Immutable provider ids.** Assignment sources store
   `owner/repo/number`; `ExternalObject.external_id` contractually requires
   "the provider's immutable id … not its number"
-  (`crates/altai-control-protocol/src/external.rs:68-69`). Numbers are
+  (`crates/altai-control-protocol/src/external.rs:67`). Numbers are
   repo-scoped and mutable; no account attribution is stored. PR 2 must
   resolve immutable ids read-only at import time (provider lookup) or
-  scope issue/pr imports down explicitly.
+  scope issue/pr imports down explicitly; when they cannot be resolved,
+  the record skips ExternalObject linking and carries its source verbatim
+  in the WorkItem payload — per-record stability over command failure.
 - **G2 — Org/project attribution.** WorkItem requires a real `project_id`
   (FK-enforced, `work_item_repository.rs:43`) and ExternalObject requires
   `organization_id`; legacy records carry at most a path-derived
@@ -110,8 +112,13 @@ with typed `SourceRevisionChanged`/`CanonicalConflict` errors otherwise
 (`crates/altai-control-plane/src/legacy_work_bridge.rs:42-56,65-126`).
 Legacy stores have no revision counters (whole-blob rewrites, L1), so the
 importer substitutes a content hash of the canonical mapped record for the
-source revision — equal key + equal hash writes nothing; changed hash
-updates exactly one row through the mapping entry. CAL-03's pure mappings
+source revision. Mechanism, resolved by package 100 PR 2: the importer owns
+a dedicated `control_plane_legacy_import_mappings` table whose hash column
+is `content_hash TEXT` (the bridge's `source_revision INTEGER` column is
+not reused), and its own upsert entry point that deliberately diverges
+from the bridge's fail-closed `project()` — equal key + equal hash writes
+nothing, changed hash updates exactly one row under optimistic concurrency,
+and `project()` itself stays untouched. CAL-03's pure mappings
 are the translation starting point, with two known divergences to correct
 there: its accepted status vocabulary (`queued|succeeded`) predates the
 live enum (`dispatching|awaiting-approval|done`), and it types
@@ -136,6 +143,19 @@ import deletes nothing.
    the mapping table is the only bridge, and no field is ever
    authoritatively written by both sides (M2-00-01 stop condition,
    `tasks/M2-00-01.md`).
+5. Imported ExternalObject rows would collide with live-synced rows at the
+   same `(integration, account_key, external_id)` uniqueness key; while G1
+   linking is conditional, the importer mints no ExternalObject rows at
+   all, so the collision case cannot arise until a later package resolves
+   it deliberately.
+
+The remaining `createAppStore` surfaces (settings, workspace folders,
+snippets, sessions, agent profiles — `src/modules/settings/store.ts:291`,
+`src/modules/workspace/folder.ts:19`, `src/modules/ai/lib/snippets.ts:19`,
+`src/modules/ai/lib/sessions.ts:73`, `src/modules/ai/lib/agents.ts:199`)
+hold configuration or backend-mirrored state, none of it assignment/todo/
+orchestration work history; they are excluded from the gate's scope by
+statement here so the inventory is exhaustive.
 
 ## 6. Non-goals
 
