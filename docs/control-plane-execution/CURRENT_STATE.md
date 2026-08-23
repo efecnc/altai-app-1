@@ -5,7 +5,7 @@
 >
 > **Date:** 2026-08-22
 >
-> **Last updated by:** Legacy importer implementation acceptance through PR #78
+> **Last updated by:** Single-writer cutover discovery acceptance through PR #80
 
 ## Accepted Tasks
 
@@ -45,6 +45,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 | CP-08 (102) | accepted | fork PR #74 / `9c03105e` | 2026-08-22 | Package 094's gate decision recorded: no-go on CRDT adoption — single-writer-per-workspace is codified policy, planned mobile/web surfaces are online monitors needing reconnection rather than merge, external-data conflicts already resolve through per-object authority, and peer-merge is incompatible with canonical-authority invariants; package 095 declined with explicit reopeners (`CRDT_OFFLINE_DISCOVERY.md`) |
 | CP-08 (103) | accepted | fork PR #76 / `7cfb9ee8` | 2026-08-22 | Legacy read-only importer boundary defined (`LEGACY_IMPORTER_DISCOVERY.md`): assignments are the primary source, manual todos join with named identity gaps PR 2 closes in scope, orchestration intents and IsanAgent-owned notifications are excluded with cited rationale; idempotency rides a dedicated mapping table on the fail-closed `legacy_work_bridge` pattern |
 | CP-08 (104) | accepted | fork PR #78 / `34b4c646` | 2026-08-23 | The importer shipped: read-only projection of legacy assignments and manual todos into canonical Work items through `control_plane_legacy_import_mappings` with length-framed keys and content-hash idempotency (identical re-import writes nothing, changed content updates exactly one row under optimistic concurrency, nothing deletes); statuses stay verbatim provenance, attribution is caller-supplied fail-closed, inputs are size-capped metadata-first — completing package 100's exit gate |
+| CP-08 (105) | accepted | fork PR #80 | 2026-08-23 | Cutover discovery recorded (`SINGLE_WRITER_CUTOVER_DISCOVERY.md`): the single-writer gate is violated by design today — two table families with live writers share one `work.db`, every mutation bypasses the read-only dispatcher, and cross-binary pairings (incl. one-shot CLI `work` commands opening `WorkStore` directly) are unarbitrated; ten writer classes inventoried and a staged plan set — lock inside `WorkStore::open`, flag ledger, dispatcher mutation surface, then per-domain transfers |
 
 ## Current Schema and Protocol Versions
 
@@ -73,7 +74,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 
 | Task ID | Risk | Depends on | Status |
 | --- | --- | --- | --- |
-| CP-08-105 | B | 053, 060, 100 | ready — per-workspace single-writer cutover discovery (Package 101 PR 1) |
+| CP-08-106 | B | CP-08-105 | **in progress** — cutover slice A primitives: workspace lock inside `WorkStore::open` + feature-flag ledger (Package 101 PR 2) |
 
 ## Known Failing Tests / Blockers
 
