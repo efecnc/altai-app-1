@@ -27,6 +27,7 @@ pub mod cron_due;
 pub mod delivery_gate;
 pub mod dispatch_eligibility;
 pub mod evidence_repository;
+pub mod feature_flag_repository;
 pub mod evidence_replay;
 pub mod evaluation_projection;
 pub mod evaluation_summary;
@@ -150,6 +151,10 @@ pub use external_object_repository::{
 pub use external_sync::{
     content_hash, resolve_external_conflict, ExternalObjectProvider, ExternalSyncConflict,
     ExternalSyncError, ExternalSyncReport, ExternalSyncService, ProviderObject,
+};
+pub use feature_flag_repository::{
+    FeatureFlagError, FeatureFlagRepository, SqliteFeatureFlagRepository,
+    CONTROL_PLANE_ENABLED_FLAG,
 };
 pub use opentag_adapter::{
     normalize_opentag_event, NormalizedOpenTagEvent, OpenTagAdapterError,

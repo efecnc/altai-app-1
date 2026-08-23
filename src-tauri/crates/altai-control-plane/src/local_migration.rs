@@ -8,7 +8,7 @@
 use crate::{
     SqliteAgentRepository, SqliteApprovalRepository, SqliteAttemptRepository,
     SqliteBudgetRepository, SqliteEvidenceRepository, SqliteExecutionSnapshotRepository,
-    SqliteExternalAccountRepository, SqliteExternalObjectRepository,
+    SqliteExternalAccountRepository, SqliteExternalObjectRepository, SqliteFeatureFlagRepository,
     SqliteNotificationProposalRepository, SqliteRecoveryRepository, SqliteRegistrationRepository,
     SqliteRepositoryScopeRepository, SqliteRoutineRepository, SqliteRunBindingRepository,
     SqliteScheduleBackendRepository, SqliteScopeRepository, SqliteUsageRepository,
@@ -20,7 +20,10 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The semantic lifecycle version of the complete local `work.db` topology.
-pub const LOCAL_WORK_DB_SCHEMA_VERSION: i64 = 4;
+/// Version 5 adds the cutover feature-flag ledger
+/// (`control_plane_feature_flags`, CP-08-106 slice A); the ledger seeds no
+/// values, so the bump carries no data migration.
+pub const LOCAL_WORK_DB_SCHEMA_VERSION: i64 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalMigrationReport {
@@ -141,6 +144,7 @@ impl LocalMigrationRunner {
         SqliteEvidenceRepository::open(database).map_err(repository_error)?;
         SqliteExternalAccountRepository::open(database).map_err(repository_error)?;
         SqliteExternalObjectRepository::open(database).map_err(repository_error)?;
+        SqliteFeatureFlagRepository::open(database).map_err(repository_error)?;
         SqliteUsageRepository::open(database).map_err(repository_error)?;
         SqliteBudgetRepository::open(database).map_err(repository_error)?;
         SqliteRecoveryRepository::open(database).map_err(repository_error)?;
@@ -218,6 +222,7 @@ mod tests {
             "control_plane_recovery_records",
             "control_plane_registered_hosts",
             "control_plane_external_objects",
+            "control_plane_feature_flags",
             "control_plane_notification_proposals",
             "control_plane_worker_delivery_claims",
         ] {

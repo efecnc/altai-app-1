@@ -4,9 +4,10 @@
 //! daemon. Schema matches `altaidevorg/altai-agent-work-os` ENGINEERING.md.
 
 use crate::journal::{EventJournal, JournalError, RunJournalSummary};
+use crate::workspace_lock::{WorkspaceFileLock, WorkspaceLockAcquireError};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -398,6 +399,11 @@ pub enum WorkStoreError {
     UnsupportedSchema(i64),
     NotFound(String),
     InvalidState(&'static str),
+    /// Another live writer — desktop, serve, one-shot CLI, any process —
+    /// already holds this workspace's single-writer lock (CP-08-106).
+    WorkspaceHeld {
+        path: PathBuf,
+    },
 }
 
 impl fmt::Display for WorkStoreError {
@@ -411,6 +417,11 @@ impl fmt::Display for WorkStoreError {
             }
             Self::NotFound(id) => write!(f, "work item not found: {id}"),
             Self::InvalidState(message) => write!(f, "invalid work transition: {message}"),
+            Self::WorkspaceHeld { path } => write!(
+                f,
+                "this workspace's work.db is held by another writer: {}",
+                path.display()
+            ),
         }
     }
 }
@@ -438,8 +449,14 @@ impl From<std::io::Error> for WorkStoreError {
 type Result<T> = std::result::Result<T, WorkStoreError>;
 
 /// Durable Work database shared by Desktop and CLI hosts.
+///
+/// Opening acquires the workspace's cross-process single-writer lock (see
+/// [`crate::workspace_lock`]) and holds it for this store's lifetime, so a
+/// second authoritative opener — in any process — fails closed with
+/// [`WorkStoreError::WorkspaceHeld`] instead of racing the first.
 pub struct WorkStore {
     connection: Mutex<Connection>,
+    _workspace_lock: WorkspaceFileLock,
 }
 
 impl WorkStore {
@@ -447,6 +464,16 @@ impl WorkStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        // Acquire before anything else touches the database: a losing opener
+        // must not create, secure, or migrate the file behind a winner's
+        // back. The lock is kernel-mediated, so a crashed holder releases it
+        // with its process and no stale-lock policy exists.
+        let _workspace_lock = WorkspaceFileLock::acquire(path).map_err(|error| match error {
+            WorkspaceLockAcquireError::Held => WorkStoreError::WorkspaceHeld {
+                path: path.to_path_buf(),
+            },
+            WorkspaceLockAcquireError::Io(error) => WorkStoreError::Io(error),
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -464,6 +491,7 @@ impl WorkStore {
         migrate(&mut connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
+            _workspace_lock,
         })
     }
 
@@ -2054,8 +2082,11 @@ fn new_id(prefix: &str) -> String {
 mod tests {
     use super::*;
     use crate::journal::JournalEvent;
+    use std::process::{Command, Stdio};
     use std::sync::{Arc, Barrier};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    const WORK_DB_LOCK_CHILD_ENV: &str = "ALTAI_TEST_HOLD_WORK_DB_LOCK";
 
     fn temp_db() -> std::path::PathBuf {
         let nanos = SystemTime::now()
@@ -2806,11 +2837,15 @@ mod tests {
             .expect("review-ready");
         drop(setup);
 
+        // The CP-08-106 single-writer lock keeps one live store per
+        // workspace, so the review race is exercised as two threads sharing
+        // the legitimate writer handle instead of two store instances.
         let barrier = Arc::new(Barrier::new(2));
+        let shared = Arc::new(WorkStore::open(&path).expect("open concurrent store"));
         let mut handles = Vec::new();
         for _ in 0..2 {
-            let store = WorkStore::open(&path).expect("open concurrent store");
             let barrier = Arc::clone(&barrier);
+            let store = Arc::clone(&shared);
             let work_id = in_review.id.clone();
             let revision = in_review.revision;
             handles.push(std::thread::spawn(move || {
@@ -2824,6 +2859,7 @@ mod tests {
             .into_iter()
             .map(|handle| handle.join().expect("review thread"))
             .collect();
+        drop(shared);
         assert!(
             outcomes.iter().all(|result| result.is_ok()),
             "outcomes: {outcomes:?}"
@@ -2879,12 +2915,15 @@ mod tests {
             .expect("review-ready");
         drop(setup);
 
+        // Same single-writer constraint as the identical-review race above:
+        // both threads contend through the one legitimate store handle.
         let barrier = Arc::new(Barrier::new(2));
+        let shared = Arc::new(WorkStore::open(&path).expect("open concurrent store"));
         let handles: Vec<_> = ["Add tests", "Add migration evidence"]
             .into_iter()
             .map(|guidance| {
-                let store = WorkStore::open(&path).expect("open concurrent store");
                 let barrier = Arc::clone(&barrier);
+                let store = Arc::clone(&shared);
                 let work_id = in_review.id.clone();
                 let revision = in_review.revision;
                 std::thread::spawn(move || {
@@ -2899,6 +2938,7 @@ mod tests {
             .into_iter()
             .map(|handle| handle.join().expect("review thread"))
             .collect();
+        drop(shared);
         assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
         assert_eq!(outcomes.iter().filter(|result| result.is_err()).count(), 1);
         assert!(outcomes
@@ -3593,5 +3633,102 @@ mod tests {
             .expect_err("empty title");
         assert!(matches!(err, WorkStoreError::InvalidState(_)));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn second_same_process_open_fails_with_workspace_held_until_first_store_drops() {
+        let database = temp_db();
+        let first = WorkStore::open(&database).expect("first open");
+
+        // The guard rides its own file description/handle, so a second open
+        // fails closed even inside the holder's own process.
+        match WorkStore::open(&database) {
+            Err(WorkStoreError::WorkspaceHeld { .. }) => {}
+            Err(other) => panic!("expected WorkspaceHeld, got {other:?}"),
+            Ok(_) => panic!("same-process double-open succeeded"),
+        }
+
+        // Release is deterministic on drop, not on process exit.
+        drop(first);
+        WorkStore::open(&database).expect("reopen after first store dropped");
+
+        let lock_file = crate::workspace_lock::lock_path_for(&database);
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_file(lock_file);
+    }
+
+    #[test]
+    fn second_process_open_fails_closed_and_kernel_releases_when_holder_dies() {
+        let database = temp_db();
+        let ready = child_ready_marker(&database);
+        let _ = std::fs::remove_file(&ready);
+
+        let mut child = Command::new(std::env::current_exe().expect("current test binary"))
+            .args([
+                "--exact",
+                // Under --exact the filter is the test's full module path.
+                "work::tests::work_db_lock_two_process_test_child_holds_until_terminated",
+            ])
+            .env(WORK_DB_LOCK_CHILD_ENV, &database)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn child test process");
+
+        // Wait until the child provably holds the lock before asserting.
+        let mut ready_seen = false;
+        for _ in 0..200 {
+            if ready.exists() {
+                ready_seen = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(ready_seen, "child never acquired the work.db lock");
+
+        match WorkStore::open(&database) {
+            Err(WorkStoreError::WorkspaceHeld { .. }) => {}
+            Err(other) => panic!("expected WorkspaceHeld, got {other:?}"),
+            Ok(_) => panic!("second-process open succeeded while child holds the lock"),
+        }
+
+        // Terminating the holder proves staleness is impossible by
+        // construction: death closes the handle and the OS drops the lock,
+        // so no recovery sweep can ever be needed.
+        child.kill().expect("terminate child holder");
+        child.wait().expect("reap child");
+
+        WorkStore::open(&database).expect("reopen after holder died");
+
+        let lock_file = crate::workspace_lock::lock_path_for(&database);
+        let _ = std::fs::remove_file(&database);
+        let _ = std::fs::remove_file(&ready);
+        let _ = std::fs::remove_file(lock_file);
+    }
+
+    /// Child half of the two-process acceptance test. Runs only when the
+    /// parent passes [`WORK_DB_LOCK_CHILD_ENV`]; otherwise it exits
+    /// immediately so ordinary `cargo test` invocations skip it silently.
+    #[test]
+    fn work_db_lock_two_process_test_child_holds_until_terminated() {
+        let Ok(database) = std::env::var(WORK_DB_LOCK_CHILD_ENV) else {
+            return;
+        };
+        let database = std::path::PathBuf::from(database);
+        // Named binding: the guard must outlive this function's body, not
+        // the statement, or the kernel releases the lock before we signal.
+        let _held_store = WorkStore::open(&database).expect("child opens work.db");
+        std::fs::write(child_ready_marker(&database), b"ready").expect("signal ready");
+        // Hold until the parent terminates this process; bounded so a wedged
+        // run cannot hang CI forever.
+        for _ in 0..600 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn child_ready_marker(database: &std::path::Path) -> std::path::PathBuf {
+        let mut name = database.file_name().unwrap_or_default().to_os_string();
+        name.push(".lock-child-ready");
+        database.with_file_name(name)
     }
 }
