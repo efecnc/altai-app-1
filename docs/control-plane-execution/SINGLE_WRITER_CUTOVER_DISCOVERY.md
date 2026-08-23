@@ -27,7 +27,8 @@ One `work.db` holds two repository families:
   (`crates/altai-cli/src/serve/work.rs:167-181`). Optimistic
   `transition(expected_revision)` (:988) serializes within a process;
   nothing arbitrates across processes.
-- **Control-plane family** (32 `control_plane_*` tables). Live writers:
+- **Control-plane family** (39 `control_plane_*` tables crate-wide, 20 of
+  them opened by the migration runner's adapters). Live writers:
   the standalone daemon (`crates/altai-control-plane/src/main.rs:31-98`,
   running its `RoutineCronBridge` unconditionally every 60 s, :63-69),
   desktop external-sync commands writing accounts/objects directly
@@ -90,7 +91,10 @@ one-shot `work` commands that open `WorkStore::open` with no migration
 runner at all (`main.rs:815-830`) — nor the daemon; the
 scheduler seam is policy without a driver (invariant 5, `CONTEXT.md:69-70`);
 dual recovery paths exist (desktop journal reconcile `work.rs:357-372` vs
-canonical `recovery_service.rs`) and must never run together.
+canonical `recovery_service.rs`) and must never run together. Note for the
+record: package 094's finding F1 ("there is no second writer to converge")
+described policy, and this inventory shows how much of it was convention —
+which is exactly why this enforcement layer exists.
 
 ## 4. Cutover plan
 
@@ -100,17 +104,29 @@ Ordered so that at every instant each field has exactly one authority:
    - *Lock*: an advisory `flock`-style lock at `<workspace>/.altai/work.db.lock`
      acquired inside `WorkStore::open` itself — the only point every M1-family
      writer passes through, including the one-shot CLI commands that bypass
-     the migration runner (C1). A crashed holder releases the lock with the
-     process (kernel-mediated), so no stale-lock policy is needed; a second
-     opener fails closed with a typed error (name: `WorkspaceHeld`).
-     The control-plane family gets the same requirement at daemon startup
-     and inside the desktop host's repository construction.
+     the migration runner (C1). The handle is retained in a process-lifetime
+     holder (the store instance), so exclusion lasts as long as the writer
+     does; a crashed holder releases the lock with the process
+     (kernel-mediated), so no stale-lock policy is needed; a second opener
+     fails closed with a typed error per transport (`WorkspaceHeld` on the
+     Rust side). The control-plane family gets the same requirement at
+     daemon startup and inside the desktop host's repository construction.
+   - *Known uncovered doors (slice A follow-up, named so none is forgotten)*:
+     four desktop command modules open `control_plane_*` repositories by
+     bare path with repo-owned DDL, outside both the runner and
+     `WorkStore::open` — gmail connect/sync (`modules/gmail/commands.rs`),
+     GitHub sync (`modules/github/external_sync.rs`), routine bridge
+     projection (`modules/routines.rs:109`) and conflict resolution
+     (`modules/external_sync.rs:72-77`). Slice A-2 converts them to the
+     gate (or routes their opens through host startup); until then they
+     are mirror writers of already-authority-scoped rows, not lifecycle
+     competitors.
    - *Flags*: `work.db`-recorded via a new ledger table (mirroring
      `control_plane_local_migrations`) + schema-version bump, starting with
      `control_plane_enabled`. Ownership becomes a recorded fact, not a build
      property.
    - *Acceptance*: a test opens a workspace twice (two processes) and
-     asserts the second fails with `WorkspaceHeld`; matrix covered:
+     asserts the second fails with the held error; matrix covered:
      desktop vs serve, desktop vs one-shot, serve vs one-shot, one-shot vs
      one-shot.
 2. **Slice B — mutation protocol surface.** Grow the dispatcher with the
@@ -122,7 +138,13 @@ Ordered so that at every instant each field has exactly one authority:
       the flag; the renderer reconcile tick and `CronActor` automations
       lose dispatch authority when it is on (`legacy_cron_compatibility`
       gates the CronActor path); the daemon's cron bridge runs only where
-      the flag says the canonical scheduler lives.
+      the flag says the canonical scheduler lives. Automation records live
+      in `agent_memory.db` (a third database family, outside work.db), so
+      the flip needs its own transfer rule mirroring C.b's mechanical
+      freeze: existing CronActor automations are snapshotted into the
+      canonical routine domain before the flag enables, and the flag flip
+      atomically retires the CronActor path — never dual-run, never silent
+      loss.
    b. *Assignments/todos*: wire the importer behind the flag. The
       importer targets `control_plane_work_items`; the M1 `work_items`
       table remains the UI's read/write store until its own transfer, and
