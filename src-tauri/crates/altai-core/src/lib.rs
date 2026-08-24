@@ -13,6 +13,7 @@ pub mod palette;
 pub mod policy;
 pub mod work;
 pub mod workspace;
+pub mod workspace_lock;
 
 pub use compaction::{
     resolve_compaction_prefs, CompactionLogicParams, CompactionOverrides, CompactionPrefs,

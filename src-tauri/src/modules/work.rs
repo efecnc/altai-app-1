@@ -178,7 +178,7 @@ pub(crate) fn authorized_workspace(
 pub(crate) fn open_store(
     registry: &WorkspaceRegistry,
     workspace_path: &str,
-) -> Result<(String, WorkStore), String> {
+) -> Result<(String, std::sync::Arc<WorkStore>), String> {
     let paths = resolve_workspace_from(Some(Path::new(workspace_path)), Path::new(workspace_path))
         .map_err(|error| error.to_string())?;
     let project_id = paths
@@ -187,17 +187,13 @@ pub(crate) fn open_store(
         .and_then(|name| name.to_str())
         .unwrap_or("workspace")
         .to_string();
-    // Every command-level open passes through the one migration lifecycle so
-    // the core store and the control-plane schema owners are brought up (or
-    // refused) together, never piecemeal.
-    registry.ensure_work_db_migrated(&paths.work_db())?;
-    let store = WorkStore::open(&paths.work_db()).map_err(|error| error.to_string())?;
+    // The registry caches one store per work.db, so every command shares the
+    // single-writer lock for the app run instead of colliding with its own
+    // concurrent commands; the cache also runs the migration lifecycle, so
+    // core and control-plane schema owners come up (or are refused) together.
+    let store = registry.work_store(&paths.work_db())?;
     store
-        .ensure_project(
-            &project_id,
-            &project_id,
-            &paths.root.to_string_lossy(),
-        )
+        .ensure_project(&project_id, &project_id, &paths.root.to_string_lossy())
         .map_err(|error| error.to_string())?;
     Ok((project_id, store))
 }

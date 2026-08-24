@@ -20,6 +20,8 @@ libc = "0.2"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    # LockFileEx's OVERLAPPED parameter lives in the System::IO module.
+    "Win32_System_IO",
 ] }
 
 [dev-dependencies]
