@@ -160,7 +160,7 @@ architecture, security, and replacement decision. “Study” does not count as 
 | Order | Package | Status | Depends on | Planned PRs | Acceptance gate |
 | ---: | --- | --- | --- | ---: | --- |
 | 100 | Legacy read-only importers | accepted | 052 | #76, #78 | Assignment/todo/orchestration state imports idempotently |
-| 101 | Per-workspace single-writer cutover | in_progress | 053, 060, 100 | #80, 1 | No workspace has two authoritative mutation paths |
+| 101 | Per-workspace single-writer cutover | in_progress | 053, 060, 100 | #80, #82, 1 | No workspace has two authoritative mutation paths |
 | 102 | Legacy UI/store/menu deletion | planned | 061–067, 101 | 2–4 | Replacement parity and rollback evidence accepted before deletion |
 | 103 | Security, soak, chaos and performance gates | planned | all runtime stages | 3 | Recovery >99.9% target, cross-org leaks zero, bounded queue/graph performance |
 | 104 | Production rollout and success metrics | planned | 103 | 1–2 | Feature flags, staged cohorts, observability and rollback runbooks accepted |
@@ -169,13 +169,12 @@ architecture, security, and replacement decision. “Study” does not count as 
 
 The next PRs are fixed until this list is updated by an accepted change:
 
-1. `CP-08-106` — cutover slice A primitives (101 PR 2)
-   (Implement the discovery's slice A exactly: advisory flock at
-   `<workspace>/.altai/work.db.lock` acquired inside `WorkStore::open`
-   with typed `WorkspaceHeld` failure and kernel-released staleness; a
-   feature-flag ledger table + schema bump starting with
-   `control_plane_enabled`; the acceptance matrix covering desktop vs
-   serve, desktop vs one-shot, serve vs one-shot, one-shot vs one-shot.)
+1. `CP-08-107` — dispatcher work-item mutation surface (101 slice B)
+   (Grow the versioned protocol with work-item create/transition commands
+   backed by the canonical repository: eight-step command pattern end to
+   end, honest `work_graph` capability flip where wired, TS mirror +
+   local==deployed conformance tests. Canonical vocabulary only; no
+   lifecycle-command restriction yet.)
 
 ## 5. Project-manager update protocol
 

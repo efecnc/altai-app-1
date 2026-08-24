@@ -5,7 +5,7 @@
 >
 > **Date:** 2026-08-22
 >
-> **Last updated by:** Single-writer cutover discovery acceptance through PR #80
+> **Last updated by:** Cutover slice A acceptance through PR #82
 
 ## Accepted Tasks
 
@@ -46,6 +46,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 | CP-08 (103) | accepted | fork PR #76 / `7cfb9ee8` | 2026-08-22 | Legacy read-only importer boundary defined (`LEGACY_IMPORTER_DISCOVERY.md`): assignments are the primary source, manual todos join with named identity gaps PR 2 closes in scope, orchestration intents and IsanAgent-owned notifications are excluded with cited rationale; idempotency rides a dedicated mapping table on the fail-closed `legacy_work_bridge` pattern |
 | CP-08 (104) | accepted | fork PR #78 / `34b4c646` | 2026-08-23 | The importer shipped: read-only projection of legacy assignments and manual todos into canonical Work items through `control_plane_legacy_import_mappings` with length-framed keys and content-hash idempotency (identical re-import writes nothing, changed content updates exactly one row under optimistic concurrency, nothing deletes); statuses stay verbatim provenance, attribution is caller-supplied fail-closed, inputs are size-capped metadata-first — completing package 100's exit gate |
 | CP-08 (105) | accepted | fork PR #80 | 2026-08-23 | Cutover discovery recorded (`SINGLE_WRITER_CUTOVER_DISCOVERY.md`): the single-writer gate is violated by design today — two table families with live writers share one `work.db`, every mutation bypasses the read-only dispatcher, and cross-binary pairings (incl. one-shot CLI `work` commands opening `WorkStore` directly) are unarbitrated; ten writer classes inventoried and a staged plan set — lock inside `WorkStore::open`, flag ledger, dispatcher mutation surface, then per-domain transfers |
+| CP-08 (106) | accepted | fork PR #82 | 2026-08-24 | Slice A shipped: advisory workspace lock inside `WorkStore::open` (flock/LockFileEx, kernel-released, `WorkspaceHeld` typed failure — covers desktop, CLI serve and one-shot doors structurally), `control_plane_feature_flags` ledger + schema v5 with `control_plane_enabled`, race-safe cached `Arc<WorkStore>` so the desktop holds its workspace's single-writer lock for the app run while external CLI processes fail typed-closed (-32005); migration checkpoint made race-safe with INSERT OR IGNORE |
 
 ## Current Schema and Protocol Versions
 
@@ -74,7 +75,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 
 | Task ID | Risk | Depends on | Status |
 | --- | --- | --- | --- |
-| CP-08-106 | B | CP-08-105 | **in progress** — cutover slice A primitives: workspace lock inside `WorkStore::open` + feature-flag ledger (Package 101 PR 2) |
+| CP-08-107 | B | CP-08-106 | ready — dispatcher work-item mutation surface (Package 101 slice B) |
 
 ## Known Failing Tests / Blockers
 
