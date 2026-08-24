@@ -122,6 +122,7 @@ pub struct WorkspaceRegistry {
     opened_roots: Mutex<HashMap<PathBuf, WorkspaceRootIdentity>>,
     canonical_cache: Mutex<HashMap<PathBuf, CanonicalEntry>>,
     migrated_work_dbs: Mutex<HashSet<PathBuf>>,
+    work_stores: Mutex<HashMap<PathBuf, std::sync::Arc<altai_core::WorkStore>>>,
     control_hosts: Mutex<HashMap<PathBuf, std::sync::Arc<ControlProtocolHost>>>,
 }
 
@@ -289,6 +290,34 @@ impl WorkspaceRegistry {
             .expect("workspace registry poisoned")
             .insert(database.to_path_buf(), host.clone());
         Ok(host)
+    }
+
+    /// One WorkStore per workspace `work.db` for this app run, shared by
+    /// every desktop command. The store holds the workspace's single-writer
+    /// lock (CP-08-106) for as long as it lives, so caching it keeps every
+    /// command on that one lock instead of letting the app's own concurrent
+    /// commands, reconcile ticks and refreshes collide into `WorkspaceHeld`
+    /// failures. The map guard is held across migrate+open so a cache miss
+    /// is filled exactly once even under concurrent callers. Built only
+    /// after the migration gate accepts the database; failures are not
+    /// cached so an updated database recovers without an app restart.
+    pub fn work_store(
+        &self,
+        database: &Path,
+    ) -> Result<std::sync::Arc<altai_core::WorkStore>, String> {
+        let mut stores = self
+            .work_stores
+            .lock()
+            .expect("workspace registry poisoned");
+        if let Some(store) = stores.get(database) {
+            return Ok(store.clone());
+        }
+        self.ensure_work_db_migrated(database)?;
+        let store = std::sync::Arc::new(
+            altai_core::WorkStore::open(database).map_err(|error| error.to_string())?,
+        );
+        stores.insert(database.to_path_buf(), store.clone());
+        Ok(store)
     }
 
     pub fn canonicalize_cached<P: AsRef<Path>>(&self, path: P) -> std::io::Result<PathBuf> {
@@ -826,6 +855,20 @@ mod work_db_lifecycle_tests {
         // Failures stay uncached so an updated database recovers without an
         // app restart — assert by looking at the still-present refusal.
         assert!(registry.ensure_work_db_migrated(&database).is_err());
+    }
+
+    #[test]
+    fn one_work_store_is_reused_per_work_db() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("work.db");
+        let registry = WorkspaceRegistry::default();
+
+        let first = registry.work_store(&database).unwrap();
+        let second = registry.work_store(&database).unwrap();
+        // Both callers share the cached store, so both share its
+        // single-writer lock instead of the second open failing against the
+        // first.
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
     }
 }
 

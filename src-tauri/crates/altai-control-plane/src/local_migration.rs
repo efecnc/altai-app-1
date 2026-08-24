@@ -160,13 +160,16 @@ impl LocalMigrationRunner {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
         let applied = if current < LOCAL_WORK_DB_SCHEMA_VERSION {
-            transaction
+            // INSERT OR IGNORE keeps two concurrent migrators from failing on
+            // the primary-key collision: whoever loses the race records no
+            // checkpoint and reports `applied: false` instead of erroring.
+            let inserted = transaction
                 .execute(
-                    "INSERT INTO control_plane_local_migrations (version, applied_at_unix_seconds) VALUES (?1, ?2)",
+                    "INSERT OR IGNORE INTO control_plane_local_migrations (version, applied_at_unix_seconds) VALUES (?1, ?2)",
                     params![LOCAL_WORK_DB_SCHEMA_VERSION, now_unix_seconds() as i64],
                 )
                 .map_err(database_error)?;
-            true
+            inserted == 1
         } else {
             false
         };

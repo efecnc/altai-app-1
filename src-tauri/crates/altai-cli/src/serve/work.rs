@@ -318,6 +318,13 @@ fn store_error(error: WorkStoreError) -> RpcError {
             code: -32002,
             message: error.to_string(),
         },
+        // A held workspace is not an internal fault: another live writer
+        // owns the single-writer lock, so callers get a distinct, retryable
+        // code instead of the internal wildcard.
+        WorkStoreError::WorkspaceHeld { .. } => RpcError {
+            code: -32005,
+            message: error.to_string(),
+        },
         _ => RpcError::internal(error.to_string()),
     }
 }
