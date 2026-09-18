@@ -9,6 +9,9 @@ pub enum WorkItemRepositoryError {
     AlreadyExists { work_item_id: String },
     NotFound { work_item_id: String },
     ProjectMismatch { work_item_id: String },
+    /// The addressed project row does not exist, so the foreign key would
+    /// reject the insert; surfaced typed instead of as an internal error.
+    ProjectNotFound { project_id: String },
     StaleRevision { work_item_id: String },
     Internal { reason: String },
 }
@@ -65,6 +68,20 @@ impl SqliteWorkItemRepository {
 }
 impl WorkItemRepository for SqliteWorkItemRepository {
     fn create(&self, item: WorkItem) -> Result<(), WorkItemRepositoryError> {
+        let project_exists: Option<i64> = self
+            .lock()?
+            .query_row(
+                "SELECT 1 FROM control_plane_projects WHERE id = ?1",
+                [&item.project_id.value],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Self::db)?;
+        if project_exists.is_none() {
+            return Err(WorkItemRepositoryError::ProjectNotFound {
+                project_id: item.project_id.value.clone(),
+            });
+        }
         let payload =
             serde_json::to_string(&item).map_err(|error| WorkItemRepositoryError::Internal {
                 reason: error.to_string(),

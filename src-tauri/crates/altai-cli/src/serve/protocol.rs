@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use altai_control_plane::{
     capabilities_from_wiring, LocalMigrationRunner, ProtocolDispatcher,
-    SqliteActivityEventRepository, SqliteControlEventRepository,
+    SqliteActivityEventRepository, SqliteControlEventRepository, SqliteWorkItemRepository,
 };
 use altai_control_protocol::{
     CapabilityNegotiationRequest, DeploymentMode, ProtocolCommand, ProtocolRequest,
@@ -31,13 +31,18 @@ impl ControlProtocolState {
         LocalMigrationRunner::migrate(&database).map_err(|error| error.to_string())?;
         let activity = Arc::new(SqliteActivityEventRepository::open(&database)?);
         let control_events = Arc::new(SqliteControlEventRepository::open(&database)?);
+        let work_items = Arc::new(SqliteWorkItemRepository::open(&database)?);
         // Capabilities stay honest: only the protocol-facing repositories
-        // this host actually wires advertise themselves. Domains without
-        // serving answer typed errors from the dispatcher, never guesses.
-        let capabilities =
-            capabilities_from_wiring(false, false, false, false, false, false, true, true);
+        // this host actually wires advertise themselves. Wiring the
+        // canonical work-item store is what flips `work_graph` here; domains
+        // without serving answer typed errors from the dispatcher, never
+        // guesses.
+        let capabilities = capabilities_from_wiring(
+            false, false, false, true, false, false, false, true, true,
+        );
         let dispatcher = Arc::new(
             ProtocolDispatcher::new(DeploymentMode::EmbeddedHost, capabilities)
+                .with_work_item_repository(work_items)
                 .with_activity_repository(activity)
                 .with_control_event_repository(control_events),
         );
@@ -154,9 +159,12 @@ mod tests {
             let activity = Arc::new(SqliteActivityEventRepository::open(&database).unwrap());
             let control_events =
                 Arc::new(SqliteControlEventRepository::open(&database).unwrap());
-            let capabilities =
-                capabilities_from_wiring(false, false, false, false, false, false, true, true);
+            let work_items = Arc::new(SqliteWorkItemRepository::open(&database).unwrap());
+            let capabilities = capabilities_from_wiring(
+                false, false, false, true, false, false, false, true, true,
+            );
             ProtocolDispatcher::new(DeploymentMode::EmbeddedHost, capabilities)
+                .with_work_item_repository(work_items)
                 .with_activity_repository(activity)
                 .with_control_event_repository(control_events)
         };
