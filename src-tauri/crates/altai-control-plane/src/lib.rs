@@ -27,6 +27,7 @@ pub mod cron_due;
 pub mod delivery_gate;
 pub mod dispatch_eligibility;
 pub mod evidence_repository;
+pub mod cron_automation_transfer;
 pub mod feature_flag_repository;
 pub mod evidence_replay;
 pub mod evaluation_projection;
@@ -155,6 +156,10 @@ pub use external_sync::{
 pub use feature_flag_repository::{
     FeatureFlagError, FeatureFlagRepository, SqliteFeatureFlagRepository,
     CONTROL_PLANE_ENABLED_FLAG,
+};
+pub use cron_automation_transfer::{
+    CronAutomationRecord, Disposition, LegacySchedule, SnapshotReport, SqliteCronAutomationTransfer,
+    TransferAttribution, TransferError,
 };
 pub use opentag_adapter::{
     normalize_opentag_event, NormalizedOpenTagEvent, OpenTagAdapterError,
