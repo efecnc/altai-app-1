@@ -18,7 +18,10 @@ use altai_agent_service::{
 use super::event_journal::EventJournal;
 #[cfg(test)]
 use super::event_journal::JournalEvent;
-use super::desktop_host::{DesktopHost, DesktopWorkspaceServices};
+use super::desktop_host::{
+    canonical_scheduling_suppresses_fires as canonical_scheduling_owns_workspace,
+    DesktopHost, DesktopWorkspaceServices,
+};
 
 use isanagent::bus::BusMessage;
 use isanagent::scheduler::{CronCommand, CronStore, ScheduleKind};
@@ -1011,6 +1014,16 @@ pub async fn create_automation(
     }
     if message.len() > 10_000 {
         return Err("Automation message is too long".to_string());
+    }
+    // Scheduling cutover (CP-08-108): once canonical scheduling owns this
+    // workspace, new automations cannot silently join the retired legacy
+    // firing path — creation fails typed-closed instead.
+    let workspace_root = resolve_workspace_root(workspace_path);
+    if canonical_scheduling_owns_workspace(&workspace_root) {
+        return Err(
+            "canonical scheduling owns this workspace: create a routine instead of a legacy automation"
+                .to_string(),
+        );
     }
     let now_ms: i64 = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -21,11 +21,31 @@ use altai_agent_service::{
 };
 use isanagent::tools::ToolRegistry;
 use std::path::Path;
-
 use super::runtime::{
     recover_background_jobs_after_owner_bind, trusted_tauri_inbound,
     validate_tauri_chat_id, WorkspaceDispatcher,
 };
+
+/// The scheduling-cutover fire-time gate (CP-08-108): once the workspace's
+/// feature-flag ledger records canonical scheduling as enabled with the
+/// legacy rollback switch un-pulled, the CronActor's ALTAI-hosted firing
+/// path stops — regardless of any retirement bookkeeping, so the flag flip
+/// alone is the switch. An unreadable ledger or workspace resolves to
+/// legacy behavior (the flag is "not yet decided").
+pub(crate) fn canonical_scheduling_suppresses_fires(workspace_root: &Path) -> bool {
+    let work_db = match altai_core::resolve_workspace_from(Some(workspace_root), workspace_root) {
+        Ok(paths) => paths.work_db(),
+        Err(_) => return false,
+    };
+    let Ok(ledger) = altai_control_plane::SqliteFeatureFlagRepository::open(&work_db) else {
+        return false;
+    };
+    matches!(
+        altai_control_plane::resolve_schedule_authority(&ledger),
+        Ok(authority) if authority.enabled && !authority.legacy_compatibility
+    )
+}
+
 use super::tauri_sink::TauriEventSink;
 use crate::modules::mcp;
 
@@ -159,11 +179,22 @@ impl DesktopHost {
         .map_err(|error| format!("Failed to initialize workspace cron actor: {error}"))?;
         let cron_node = NodeHandle::new(cron_logic, 100, 1, Duration::from_millis(50));
         let dispatcher_for_cron = dispatcher.clone();
+        let cron_workspace_root = dir.clone();
         let cron_forwarder = async_runtime::spawn(async move {
             while let Some(message) = cron_bus_rx.recv().await {
                 let BusMessage::Inbound(inbound) = message else {
                     continue;
                 };
+                // Fire-time gate (CP-08-108): once canonical scheduling owns
+                // this workspace, the legacy firing path stops here — the
+                // flip is the switch, bookkeeping is not.
+                if canonical_scheduling_suppresses_fires(&cron_workspace_root) {
+                    log::info!(
+                        "Suppressed cron fire for {}: canonical scheduling owns this workspace",
+                        inbound.chat_id
+                    );
+                    continue;
+                }
                 let chat_id = inbound.chat_id.clone();
                 if inbound.channel != "tauri"
                     || inbound.thread_id.is_some()
