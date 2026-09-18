@@ -57,6 +57,7 @@ pub mod run_binding_repository;
 pub mod run_context;
 pub mod schedule_backend_repository;
 pub mod scheduler;
+pub mod scheduler_driver;
 pub mod scope_repository;
 mod service;
 pub mod sqlite_agent;
@@ -179,6 +180,11 @@ pub use run_context::{
     MAX_RUN_CONTEXT_BYTES,
 };
 pub use scheduler::{ScheduleResult, SchedulerError, SingleWriterScheduler};
+pub use scheduler_driver::{
+    resolve_schedule_authority, DriverError, ScheduleAuthority, SchedulerDriver, TickOutcome,
+    LEGACY_CRON_COMPATIBILITY_FLAG, SCHEDULE_OWNER_DAEMON, SCHEDULE_OWNER_DESKTOP,
+    SCHEDULE_OWNER_FLAG,
+};
 pub use schedule_backend_repository::{
     ScheduleBackendError, ScheduleBackendRepository, SqliteScheduleBackendRepository,
 };
