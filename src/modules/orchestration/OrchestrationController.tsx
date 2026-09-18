@@ -50,6 +50,15 @@ async function reconcile(workspaceKey: string): Promise<void> {
   const snapshot = await native.orchestrationSnapshot(workspaceKey);
   orchestration.setSnapshot(workspaceKey, snapshot);
   if (snapshot.status !== "running" || !snapshot.taskSessionId) return;
+  // Scheduling cutover (CP-08-108): once canonical scheduling owns this
+  // workspace, the renderer tick keeps its observation-only duties but
+  // makes no claim/dispatch decisions — exactly one scheduler exists.
+  try {
+    const authority = await native.schedulingAuthority(workspaceKey);
+    if (authority.canonical) return;
+  } catch {
+    // An unreadable authority leaves legacy behavior untouched.
+  }
   if (!useAssignmentsStore.getState().hydrated) return;
   const workflow = orchestration.effectiveWorkflows[workspaceKey];
   if (!workflow) return;

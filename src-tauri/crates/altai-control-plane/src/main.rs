@@ -2,7 +2,8 @@ use altai_control_plane::{
     router_with_control_repositories, BootstrapCredential, ControlPlane, ControlPlaneConfig,
     ControlPlaneStore, RoutineCronBridge, RoutineMaterializer, SqliteActivityEventRepository,
     SqliteAgentRepository, SqliteApprovalRepository, SqliteAttemptRepository,
-    SqliteControlEventRepository, SqlitePluginRegistry, SqliteRegistrationRepository,
+    SqliteControlEventRepository, SqliteFeatureFlagRepository, SqlitePluginRegistry,
+    SqliteRegistrationRepository,
     SqliteRoutineRepository,
     SqliteRunBindingRepository, SqliteScopeRepository, SqliteWakeRepository,
     SqliteWorkGraphRepository, SqliteWorkItemRepository, DEFAULT_CRON_TICK,
@@ -61,13 +62,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let control_event_repository =
         Arc::new(SqliteControlEventRepository::open(&work_db)?);
     let plugin_registry = Arc::new(SqlitePluginRegistry::open(&work_db)?);
-    // Managed cron bridge: periodically materialize active recurring routines
-    // into wakes. Clones share the same sqlite connections the router uses.
+    // Managed cron bridge under the scheduling cutover's authority gate: the
+    // loop re-reads the feature-flag ledger every tick and materializes only
+    // while this daemon is the named schedule owner (holding the workspace
+    // single-writer lock). Flag-free deployments stay byte-for-byte idle
+    // here — which is exactly today's unconditional behavior, gated.
     let materializer = Arc::new(RoutineMaterializer::new(
         routine_repository.clone(),
         wake_repository.clone(),
     ));
-    tokio::spawn(RoutineCronBridge::new(materializer, DEFAULT_CRON_TICK).run());
+    let ledger = Arc::new(SqliteFeatureFlagRepository::open(&work_db)?);
+    tokio::spawn(
+        RoutineCronBridge::new(materializer, DEFAULT_CRON_TICK)
+            .run_gated(ledger, work_db.clone()),
+    );
     let plane = Arc::new(ControlPlane::with_registration_repository(
         config,
         Arc::new(SqliteRegistrationRepository::open(&work_db)?),

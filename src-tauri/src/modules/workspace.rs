@@ -116,6 +116,63 @@ impl WorkspaceRootIdentity {
     }
 }
 
+/// One canonical schedule driver per workspace `work.db` per app run
+/// (CP-08-108, package 101 slice C.a). The thread exists for every
+/// migrated workspace, but each tick re-reads the feature-flag ledger and
+/// materializes due routines only while the ledger names the desktop as
+/// the schedule's owner — an absent or foreign flag keeps it idle. The
+/// desktop's app-run workspace lock (the cached WorkStore) already covers
+/// the single-writer pairing, so no extra lock is taken here.
+fn ensure_desktop_schedule_driver(work_db: &Path) {
+    static DRIVERS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    let drivers = DRIVERS.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = drivers.lock().expect("schedule driver registry poisoned");
+    if !guard.insert(work_db.to_path_buf()) {
+        return;
+    }
+    drop(guard);
+    let Ok(routines) = altai_control_plane::SqliteRoutineRepository::open(work_db) else {
+        return;
+    };
+    let Ok(wakes) = altai_control_plane::SqliteWakeRepository::open(work_db) else {
+        return;
+    };
+    let Ok(ledger) = altai_control_plane::SqliteFeatureFlagRepository::open(work_db) else {
+        return;
+    };
+    let materializer = std::sync::Arc::new(altai_control_plane::RoutineMaterializer::new(
+        std::sync::Arc::new(routines),
+        std::sync::Arc::new(wakes),
+    ));
+    let ledger = std::sync::Arc::new(ledger);
+    let spawn = std::thread::Builder::new().name("desktop-schedule-driver".to_string());
+    let result = spawn.spawn(move || {
+        let driver = altai_control_plane::SchedulerDriver::new(
+            materializer,
+            ledger,
+            altai_control_plane::SCHEDULE_OWNER_DESKTOP,
+        );
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+            // A failed tick is logged and the loop continues: one bad tick
+            // must not halt scheduling for every other routine.
+            if let Err(error) = driver.tick(now_unix_seconds()) {
+                eprintln!("desktop schedule driver tick failed: {error}");
+            }
+        }
+    });
+    if let Err(error) = result {
+        eprintln!("failed to spawn desktop schedule driver: {error}");
+    }
+}
+
+fn now_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 #[derive(Default)]
 pub struct WorkspaceRegistry {
     roots: Mutex<HashSet<PathBuf>>,
@@ -264,6 +321,8 @@ impl WorkspaceRegistry {
             },
         )?;
         migrated.insert(database.to_path_buf());
+        drop(migrated);
+        ensure_desktop_schedule_driver(database);
         Ok(())
     }
 

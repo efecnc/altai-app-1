@@ -1496,6 +1496,13 @@ export const native = {
       workspaceKey,
       config,
     }),
+  schedulingAuthority: (workspacePath: string) =>
+    invoke<{
+      canonical: boolean;
+      enabled: boolean;
+      legacy_cron_compatibility: boolean;
+      owner: string | null;
+    }>("control_plane_scheduling_authority", { workspacePath }),
   orchestrationPause: (workspaceKey: string) =>
     invoke<OrchestrationSnapshot>("orchestration_pause", { workspaceKey }),
   orchestrationStop: (workspaceKey: string) =>

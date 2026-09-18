@@ -7,8 +7,9 @@
 
 use crate::{
     SqliteAgentRepository, SqliteApprovalRepository, SqliteAttemptRepository,
-    SqliteBudgetRepository, SqliteEvidenceRepository, SqliteExecutionSnapshotRepository,
-    SqliteExternalAccountRepository, SqliteExternalObjectRepository, SqliteFeatureFlagRepository,
+    SqliteBudgetRepository, SqliteCronAutomationTransfer, SqliteEvidenceRepository,
+    SqliteExecutionSnapshotRepository, SqliteExternalAccountRepository,
+    SqliteExternalObjectRepository, SqliteFeatureFlagRepository,
     SqliteNotificationProposalRepository, SqliteRecoveryRepository, SqliteRegistrationRepository,
     SqliteRepositoryScopeRepository, SqliteRoutineRepository, SqliteRunBindingRepository,
     SqliteScheduleBackendRepository, SqliteScopeRepository, SqliteUsageRepository,
@@ -20,10 +21,10 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The semantic lifecycle version of the complete local `work.db` topology.
-/// Version 5 adds the cutover feature-flag ledger
-/// (`control_plane_feature_flags`, CP-08-106 slice A); the ledger seeds no
-/// values, so the bump carries no data migration.
-pub const LOCAL_WORK_DB_SCHEMA_VERSION: i64 = 5;
+/// Version 6 adds the cron-automation transfer mapping table
+/// (`control_plane_cron_automation_mappings`, CP-08-108 slice C.a); the
+/// table seeds no values, so the bump carries no data migration.
+pub const LOCAL_WORK_DB_SCHEMA_VERSION: i64 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalMigrationReport {
@@ -145,6 +146,7 @@ impl LocalMigrationRunner {
         SqliteExternalAccountRepository::open(database).map_err(repository_error)?;
         SqliteExternalObjectRepository::open(database).map_err(repository_error)?;
         SqliteFeatureFlagRepository::open(database).map_err(repository_error)?;
+        SqliteCronAutomationTransfer::open(database).map_err(repository_error)?;
         SqliteUsageRepository::open(database).map_err(repository_error)?;
         SqliteBudgetRepository::open(database).map_err(repository_error)?;
         SqliteRecoveryRepository::open(database).map_err(repository_error)?;
