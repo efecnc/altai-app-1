@@ -47,8 +47,6 @@ export interface TransitionWorkItemCommand {
   expected_revision: Revision;
 }
 
-import type { GoalId, ProjectId } from "./ids.js";
-
 export const CONTROL_PLANE_PROTOCOL_VERSION_MAJOR = 1;
 export const CONTROL_PLANE_PROTOCOL_VERSION_MINOR = 0;
 

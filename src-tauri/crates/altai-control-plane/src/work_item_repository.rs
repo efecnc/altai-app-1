@@ -1,6 +1,6 @@
 //! CP-06 durable canonical WorkItem repository.
 
-use altai_control_protocol::{ProjectId, Revision, WorkItem, WorkItemId};
+use altai_control_protocol::{OrganizationId, ProjectId, Revision, WorkItem, WorkItemId};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{path::Path, sync::Mutex};
 
@@ -35,6 +35,13 @@ pub trait WorkItemRepository: Send + Sync {
         item: WorkItem,
         expected_revision: Revision,
     ) -> Result<WorkItem, WorkItemRepositoryError>;
+    /// The organization the addressed project belongs to. Lets callers bind
+    /// a command's claimed organization to the project's actual one
+    /// (cross-organization attribution fails closed) without a second store.
+    fn project_organization(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<OrganizationId, WorkItemRepositoryError>;
 }
 
 pub struct SqliteWorkItemRepository {
@@ -68,20 +75,7 @@ impl SqliteWorkItemRepository {
 }
 impl WorkItemRepository for SqliteWorkItemRepository {
     fn create(&self, item: WorkItem) -> Result<(), WorkItemRepositoryError> {
-        let project_exists: Option<i64> = self
-            .lock()?
-            .query_row(
-                "SELECT 1 FROM control_plane_projects WHERE id = ?1",
-                [&item.project_id.value],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(Self::db)?;
-        if project_exists.is_none() {
-            return Err(WorkItemRepositoryError::ProjectNotFound {
-                project_id: item.project_id.value.clone(),
-            });
-        }
+        self.project_organization(&item.project_id)?;
         let payload =
             serde_json::to_string(&item).map_err(|error| WorkItemRepositoryError::Internal {
                 reason: error.to_string(),
@@ -150,6 +144,28 @@ impl WorkItemRepository for SqliteWorkItemRepository {
             params![item.id.value, payload, serde_json::to_string(&existing).map_err(|error| WorkItemRepositoryError::Internal { reason: error.to_string() })?],
         ).map_err(Self::db)?;
         if changed == 1 { Ok(item) } else { Err(WorkItemRepositoryError::StaleRevision { work_item_id: item.id.value }) }
+    }
+    fn project_organization(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<OrganizationId, WorkItemRepositoryError> {
+        let stored: Option<String> = self
+            .lock()?
+            .query_row(
+                "SELECT organization_id FROM control_plane_projects WHERE id = ?1",
+                [&project_id.value],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Self::db)?;
+        stored
+            .map(|value| OrganizationId {
+                kind: OrganizationId::TYPE.to_string(),
+                value,
+            })
+            .ok_or_else(|| WorkItemRepositoryError::ProjectNotFound {
+                project_id: project_id.value.clone(),
+            })
     }
 }
 

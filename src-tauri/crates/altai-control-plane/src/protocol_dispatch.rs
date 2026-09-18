@@ -27,7 +27,9 @@ use crate::{ActivityEventRepository, ControlEventRepository, WorkItemRepository}
 
 /// Capabilities honestly derived from the repositories wired into the
 /// transport. Domains with protocol-facing routes advertise `true`; budgets,
-/// evidence and workspace scopes stay `false` until they have serving.
+/// evidence and workspace scopes stay `false` until they have serving. The
+/// work-graph mutation surface additionally requires its audit stores: a
+/// deployment that cannot attribute mutations does not advertise the domain.
 #[allow(clippy::too_many_arguments)]
 pub fn capabilities_from_wiring(
     scope_repository: bool,
@@ -46,7 +48,8 @@ pub fn capabilities_from_wiring(
         projects: scope_repository,
         workspaces: scope_repository,
         agents: agent_repository,
-        work_graph: work_graph_repository || work_item_repository,
+        work_graph: work_graph_repository
+            || (work_item_repository && activity_repository && control_event_repository),
         attempts: attempt_repository,
         routines: routine_repository,
         approvals: approval_repository,
@@ -228,6 +231,12 @@ impl ProtocolDispatcher {
             &command.description,
             MAX_WORK_ITEM_DESCRIPTION_BYTES,
         )?;
+        self.require_audit_wiring()?;
+
+        // (5) Scope resolution: the project must exist and belong to the
+        // organization the command claims — a foreign organization_id never
+        // becomes the audit attribution for this project's work.
+        Self::require_project_organization(store, &command.organization_id, &command.project_id)?;
 
         let timestamp = now_timestamp();
         let item = WorkItem {
@@ -270,6 +279,8 @@ impl ProtocolDispatcher {
         Self::require_typed_id(&command.organization_id.kind, OrganizationId::TYPE, "organization_id")?;
         Self::require_typed_id(&command.project_id.kind, ProjectId::TYPE, "project_id")?;
         Self::require_typed_id(&command.work_item_id.kind, WorkItemId::TYPE, "work_item_id")?;
+        self.require_audit_wiring()?;
+        Self::require_project_organization(store, &command.organization_id, &command.project_id)?;
 
         let current = store
             .get_in_project(&command.project_id, &command.work_item_id)
@@ -376,6 +387,57 @@ impl ProtocolDispatcher {
                 ControlErrorCode::InvalidId,
                 format!("{field} must be a {expected} id"),
             ))
+        }
+    }
+
+    /// Audit attribution is structural, not conventional: a deployment that
+    /// cannot record the activity fact and the replayable control event does
+    /// not get to mutate canonical work. Every in-repo host wires both.
+    fn require_audit_wiring(&self) -> Result<(), ProtocolError> {
+        if self.activity.is_some() && self.control_events.is_some() {
+            Ok(())
+        } else {
+            Err(ProtocolError::new(
+                ControlErrorCode::PolicyDenied,
+                "work-item mutations require wired activity_audit and event_replay stores",
+            ))
+        }
+    }
+
+    /// (5) Scope resolution shared by both mutation pipelines: the project
+    /// must exist, and the organization the command claims must be the
+    /// project's actual one. Cross-organization attribution fails closed.
+    fn require_project_organization(
+        store: &Arc<dyn WorkItemRepository>,
+        claimed: &OrganizationId,
+        project_id: &ProjectId,
+    ) -> Result<(), ProtocolError> {
+        let actual = store
+            .project_organization(project_id)
+            .map_err(Self::project_organization_failure)?;
+        if actual == *claimed {
+            Ok(())
+        } else {
+            Err(ProtocolError::new(
+                ControlErrorCode::PolicyDenied,
+                format!(
+                    "organization {} does not contain project {}",
+                    claimed.value, project_id.value
+                ),
+            ))
+        }
+    }
+
+    fn project_organization_failure(error: crate::WorkItemRepositoryError) -> ProtocolError {
+        match error {
+            crate::WorkItemRepositoryError::ProjectNotFound { project_id } => ProtocolError::new(
+                ControlErrorCode::NotFound,
+                format!("project not found: {project_id}"),
+            ),
+            other => ProtocolError::new(
+                ControlErrorCode::InternalError,
+                format!("project resolution failed: {other}"),
+            ),
         }
     }
 
@@ -649,12 +711,16 @@ mod tests {
         assert!(!wired.budgets && !wired.evidence && !wired.workspace_scopes);
 
         // The work-graph capability is honest: it is advertised when either
-        // work-graph repository family is wired, and not before.
+        // work-graph repository family is wired — and the canonical
+        // mutation surface only counts when its audit stores are wired too.
         let no_work = capabilities_from_wiring(true, true, false, false, true, true, true, true, true);
         assert!(!no_work.work_graph);
         let work_items_only =
             capabilities_from_wiring(true, true, false, true, true, true, true, true, true);
         assert!(work_items_only.work_graph);
+        let unattributed_mutations =
+            capabilities_from_wiring(true, true, false, true, true, true, true, false, true);
+        assert!(!unattributed_mutations.work_graph);
 
         let bare =
             capabilities_from_wiring(false, false, false, false, false, false, false, false, false);
@@ -1104,6 +1170,41 @@ mod tests {
             Err(error) => assert_eq!(error.code, ControlErrorCode::InvalidId),
             other => panic!("expected invalid id, got {other:?}"),
         }
+
+        let oversized_description = request("req-w4g", 1, {
+            let mut payload = match create_payload("6b") {
+                ProtocolCommand::CreateWorkItem(inner) => inner,
+                other => panic!("unexpected payload {other:?}"),
+            };
+            payload.description = "x".repeat(MAX_WORK_ITEM_DESCRIPTION_BYTES + 1);
+            ProtocolCommand::CreateWorkItem(payload)
+        });
+        let local = h.dispatcher.execute(&oversized_description);
+        let deployed = post_command(&h, &oversized_description).await;
+        assert_eq!(local, deployed);
+        match local.result {
+            Err(error) => assert_eq!(error.code, ControlErrorCode::PayloadTooLarge),
+            other => panic!("expected payload too large, got {other:?}"),
+        }
+
+        let foreign_goal = request("req-w4h", 1, {
+            let mut payload = match create_payload("6c") {
+                ProtocolCommand::CreateWorkItem(inner) => inner,
+                other => panic!("unexpected payload {other:?}"),
+            };
+            payload.goal_id = Some(altai_control_protocol::GoalId {
+                kind: "workspace_id".to_string(),
+                value: "not-a-goal".to_string(),
+            });
+            ProtocolCommand::CreateWorkItem(payload)
+        });
+        let local = h.dispatcher.execute(&foreign_goal);
+        let deployed = post_command(&h, &foreign_goal).await;
+        assert_eq!(local, deployed);
+        match local.result {
+            Err(error) => assert_eq!(error.code, ControlErrorCode::InvalidId),
+            other => panic!("expected invalid id, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1132,6 +1233,127 @@ mod tests {
             }
             other => panic!("expected typed error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn work_item_mutations_without_wired_audit_stores_are_typed_denied() {
+        // The work-item store alone is not enough: audit attribution is
+        // structural, so a dispatcher that cannot record the activity fact
+        // and the replayable control event refuses mutations typed-closed.
+        let unattributed = ProtocolDispatcher::new(
+            DeploymentMode::EmbeddedHost,
+            capabilities_from_wiring(true, true, false, true, true, true, true, false, false),
+        )
+        .with_work_item_repository(harness().work_items);
+        for (id, payload) in [
+            ("req-w5c", create_payload("7c")),
+            (
+                "req-w5d",
+                transition_payload("7c", WorkStatus::Todo, Revision::INITIAL),
+            ),
+        ] {
+            let response = unattributed.execute(&request(id, 1, payload));
+            match response.result {
+                Err(error) => {
+                    assert_eq!(error.code, ControlErrorCode::PolicyDenied);
+                    assert!(error.message.contains("activity_audit"), "{error:?}");
+                }
+                other => panic!("expected typed error, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn work_item_command_organization_must_match_the_project() {
+        let h = harness();
+        let foreign_org = request("req-w7", 1, {
+            let mut payload = match create_payload("9") {
+                ProtocolCommand::CreateWorkItem(inner) => inner,
+                other => panic!("unexpected payload {other:?}"),
+            };
+            payload.organization_id = OrganizationId::new("other");
+            ProtocolCommand::CreateWorkItem(payload)
+        });
+        let local = h.dispatcher.execute(&foreign_org);
+        let deployed = post_command(&h, &foreign_org).await;
+        assert_eq!(local, deployed);
+        match local.result {
+            Err(error) => {
+                assert_eq!(error.code, ControlErrorCode::PolicyDenied);
+                assert!(error.message.contains("does not contain project"));
+            }
+            other => panic!("expected typed denial, got {other:?}"),
+        }
+        // No row and no audit event may exist for the rejected create.
+        assert!(h.work_items.get(&work_item_id("9")).is_err());
+        assert!(h
+            .control_events
+            .replay(&altai_control_protocol::EventReplayRequest::new(
+                OrganizationId::new("other"),
+                0,
+                None
+            ))
+            .unwrap()
+            .events
+            .is_empty());
+    }
+
+    #[test]
+    fn concurrent_transitions_from_the_same_revision_admit_exactly_one() {
+        let h = harness();
+        h.dispatcher
+            .execute(&request("req-w8", 1, create_payload("10")))
+            .result
+            .unwrap();
+        let first = request(
+            "req-w8a",
+            1,
+            transition_payload("10", WorkStatus::InProgress, Revision::INITIAL),
+        );
+        let second = request(
+            "req-w8b",
+            1,
+            transition_payload("10", WorkStatus::Blocked, Revision::INITIAL),
+        );
+        let dispatcher = h.dispatcher.clone();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let first_barrier = barrier.clone();
+        let second_barrier = barrier.clone();
+        let (first_result, second_result) = std::thread::scope(|scope| {
+            let dispatcher_b = dispatcher.clone();
+            let first_handle = scope.spawn(move || {
+                first_barrier.wait();
+                dispatcher.execute(&first)
+            });
+            let second_handle = scope.spawn(move || {
+                second_barrier.wait();
+                dispatcher_b.execute(&second)
+            });
+            (first_handle.join().unwrap(), second_handle.join().unwrap())
+        });
+        let outcomes = [first_result.result, second_result.result];
+        let wins = outcomes
+            .iter()
+            .filter(|r| matches!(r, Ok(ProtocolOutcome::WorkItemTransitioned(_))))
+            .count();
+        let stale = outcomes
+            .iter()
+            .filter(|r| matches!(
+                r,
+                Err(error) if error.code == ControlErrorCode::StaleRevision
+            ))
+            .count();
+        assert_eq!(
+            (wins, stale),
+            (1, 1),
+            "exactly one concurrent transition may win: {outcomes:?}"
+        );
+        let final_item = h.work_items.get(&work_item_id("10")).unwrap();
+        assert_eq!(final_item.revision, Revision::new(1));
+        assert!(
+            final_item.status == WorkStatus::InProgress || final_item.status == WorkStatus::Blocked,
+            "final status must be exactly one of the two contenders"
+        );
     }
 
     #[test]
