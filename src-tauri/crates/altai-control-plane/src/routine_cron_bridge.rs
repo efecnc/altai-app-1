@@ -11,7 +11,10 @@
 //! native-vs-managed `ScheduleBackend` binding happens downstream when a
 //! routine wake becomes an attempt.
 
-use crate::{RoutineMaterializer, RoutineMaterializationError};
+use crate::{
+    resolve_schedule_authority, FeatureFlagRepository, RoutineMaterializer,
+    RoutineMaterializationError, SCHEDULE_OWNER_DAEMON,
+};
 use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -46,6 +49,10 @@ impl RoutineCronBridge {
 
     /// Run the bridge until the runtime drops the task. Each tick materializes at
     /// the wall-clock `now`; a failed tick is logged and the loop continues.
+    ///
+    /// Unconditional form: kept for deployments that do not participate in
+    /// the scheduling cutover (tests, flag-free standalone runs). The daemon
+    /// entry point uses [`Self::run_gated`].
     pub async fn run(self) {
         let mut ticker = tokio::time::interval(self.period);
         loop {
@@ -53,6 +60,59 @@ impl RoutineCronBridge {
             let now = wall_clock_now();
             if let Err(error) = self.tick(now) {
                 eprintln!("routine cron bridge tick at {now} failed: {error}");
+            }
+        }
+    }
+
+    /// Authority-gated loop for the scheduling cutover (CP-08-108): each
+    /// tick re-reads the feature-flag ledger and materializes only while it
+    /// names this daemon as the schedule's owner with the rollback switch
+    /// un-pulled. While owning, the daemon additionally holds the
+    /// workspace's single-writer lock — the same kernel-mediated lock the
+    /// desktop holds for its app run — so a live desktop's workspace is
+    /// never double-driven; when ownership moves away, the lock is
+    /// released so the desktop can resume. A `WorkspaceHeld` refusal is
+    /// logged and the tick stays idle.
+    pub async fn run_gated(
+        self,
+        ledger: std::sync::Arc<dyn FeatureFlagRepository>,
+        work_db: std::path::PathBuf,
+    ) {
+        let mut ticker = tokio::time::interval(self.period);
+        // Held across iterations only while this process is the named
+        // owner; dropping the handle releases the kernel lock.
+        let mut owned_workspace: Option<std::sync::Arc<altai_core::WorkStore>> = None;
+        loop {
+            ticker.tick().await;
+            let now = wall_clock_now();
+            let authority = match resolve_schedule_authority(ledger.as_ref()) {
+                Ok(authority) => authority,
+                Err(error) => {
+                    eprintln!("schedule authority lookup failed: {error}");
+                    continue;
+                }
+            };
+            if authority.authorizes(SCHEDULE_OWNER_DAEMON) {
+                if owned_workspace.is_none() {
+                    match altai_core::WorkStore::open(&work_db) {
+                        Ok(store) => owned_workspace = Some(std::sync::Arc::new(store)),
+                        Err(error) => {
+                            // The desktop (or another binary) owns this
+                            // workspace's writer lock: fail closed, stay idle.
+                            eprintln!(
+                                "schedule authority names this daemon but the workspace is held: {error}"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                if let Err(error) = self.tick(now) {
+                    eprintln!("routine cron bridge tick at {now} failed: {error}");
+                }
+            } else {
+                // Authority moved away (flag off, owner renamed, rollback
+                // pulled): release the lock so the desktop can resume.
+                owned_workspace = None;
             }
         }
     }

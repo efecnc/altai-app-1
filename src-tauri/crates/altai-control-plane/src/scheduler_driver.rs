@@ -234,7 +234,7 @@ mod tests {
             h.driver.tick(0).unwrap(),
             TickOutcome::Materialized { enqueued: 0 }
         );
-        seed_active_cron_routine(&h.dir.path(), "* * * * *");
+        seed_active_cron_routine(h.dir.path(), "* * * * *");
         // A due routine (cron "*" fires every minute) materializes a wake:
         // tick from two minutes out so the next fire is already due.
         let now = std::time::SystemTime::now()
