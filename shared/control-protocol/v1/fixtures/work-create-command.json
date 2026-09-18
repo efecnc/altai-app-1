@@ -1,0 +1,13 @@
+{
+  "type": "create_work_item",
+  "payload": {
+    "organization_id": { "type": "organization_id", "value": "org_01923abc-def0-7abc-8def-0123456789ab" },
+    "project_id": { "type": "project_id", "value": "proj_01923abc-def0-7abc-8def-0123456789ab" },
+    "work_item_id": { "type": "work_item_id", "value": "wi_01923abc-def0-7abc-8def-0123456789ab" },
+    "goal_id": null,
+    "parent_work_item_id": null,
+    "kind": "task",
+    "title": "Launch control plane",
+    "description": "Create the federated execution path."
+  }
+}

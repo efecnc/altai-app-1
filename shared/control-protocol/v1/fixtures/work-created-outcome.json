@@ -1,0 +1,17 @@
+{
+  "type": "work_item_created",
+  "payload": {
+    "id": { "type": "work_item_id", "value": "wi_01923abc-def0-7abc-8def-0123456789ab" },
+    "project_id": { "type": "project_id", "value": "proj_01923abc-def0-7abc-8def-0123456789ab" },
+    "goal_id": null,
+    "parent_work_item_id": null,
+    "kind": "task",
+    "title": "Launch control plane",
+    "description": "Create the federated execution path.",
+    "status": "backlog",
+    "execution_phase": "none",
+    "revision": 0,
+    "created_at": "2026-09-18T10:00:00.000Z",
+    "updated_at": "2026-09-18T10:00:00.000Z"
+  }
+}

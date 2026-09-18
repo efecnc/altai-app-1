@@ -215,6 +215,7 @@ fn build_plane(
         Some(Arc::new(InMemoryScopeRepository::default())),
         Some(Arc::new(InMemoryAgentRepository::default())),
         Some(work_graph.clone()),
+        None,
         Arc::new(InMemoryWakeRepository::default()),
         Some(Arc::new(
             SqliteRunBindingRepository::open(&sqlite("bindings.db")).map_err(|error| {

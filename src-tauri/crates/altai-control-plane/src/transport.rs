@@ -9,7 +9,7 @@ use crate::{
     AgentRepositoryError, ApprovalError, ApprovalRepository, AttemptFinalization,
     AttemptFinalizationError, AttemptRepository, ControlEventRepository, ControlPlane,
     ControlPlaneError, PluginRegistry, PluginRegistryError, ProtocolDispatcher, RegistrationGrant,
-    RoutineError, RoutineRepository,
+    RoutineError, RoutineRepository, WorkItemRepository,
     RunBindingError, RunBindingRepository, RunOutcome, ScopeError, ScopeRepository, WakeError,
     WakeRepository, WorkGraphError, WorkGraphRepository,
 };
@@ -150,6 +150,7 @@ pub fn router_with_all_repositories(
         false,
         false,
         false,
+        false,
     );
     let state = ApiState {
         plane,
@@ -203,6 +204,7 @@ pub fn router_with_control_repositories(
     scope_repository: Option<Arc<dyn ScopeRepository>>,
     agent_repository: Option<Arc<dyn AgentRepository>>,
     work_graph_repository: Option<Arc<dyn WorkGraphRepository>>,
+    work_item_repository: Option<Arc<dyn WorkItemRepository>>,
     wake_repository: Arc<dyn WakeRepository>,
     run_binding_repository: Option<Arc<dyn RunBindingRepository>>,
     attempt_repository: Option<Arc<dyn AttemptRepository>>,
@@ -216,6 +218,7 @@ pub fn router_with_control_repositories(
         scope_repository.is_some(),
         agent_repository.is_some(),
         work_graph_repository.is_some(),
+        work_item_repository.is_some(),
         attempt_repository.is_some(),
         routine_repository.is_some(),
         approval_repository.is_some(),
@@ -223,6 +226,9 @@ pub fn router_with_control_repositories(
         control_event_repository.is_some(),
     );
     let mut dispatcher = ProtocolDispatcher::new(DeploymentMode::LocalDaemon, capabilities);
+    if let Some(repository) = &work_item_repository {
+        dispatcher = dispatcher.with_work_item_repository(repository.clone());
+    }
     if let Some(repository) = &activity_repository {
         dispatcher = dispatcher.with_activity_repository(repository.clone());
     }
@@ -1142,6 +1148,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Arc::new(InMemoryWakeRepository::default()),
             None,
             None,
@@ -1191,6 +1198,7 @@ mod tests {
         let app = router_with_control_repositories(
             plane,
             BootstrapCredential::from_plaintext("test-bootstrap-token").unwrap(),
+            None,
             None,
             None,
             None,
@@ -1303,6 +1311,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Arc::new(InMemoryWakeRepository::default()),
             None,
             Some(attempt_repository),
@@ -1402,6 +1411,7 @@ mod tests {
         let app = router_with_control_repositories(
             plane,
             BootstrapCredential::from_plaintext("test-bootstrap-token").unwrap(),
+            None,
             None,
             None,
             None,
@@ -1618,6 +1628,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Arc::new(InMemoryWakeRepository::default()),
             None,
             None,
@@ -1803,6 +1814,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Arc::new(InMemoryWakeRepository::default()),
             None,
             None,
@@ -1931,6 +1943,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Arc::new(InMemoryWakeRepository::default()),
             None,
             None,
@@ -2011,6 +2024,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Arc::new(InMemoryWakeRepository::default()),
             None,
             None,
@@ -2024,7 +2038,7 @@ mod tests {
         // own (LocalDaemon, honest wiring) — and the way embedded hosts build
         // theirs, modulo deployment mode.
         let capabilities =
-            capabilities_from_wiring(false, false, false, false, false, false, true, true);
+            capabilities_from_wiring(false, false, false, false, false, false, false, true, true);
         let reference = ProtocolDispatcher::new(DeploymentMode::LocalDaemon, capabilities)
             .with_activity_repository(activity)
             .with_control_event_repository(control_events);
@@ -2141,6 +2155,7 @@ mod tests {
         let app = router_with_control_repositories(
             plane,
             BootstrapCredential::from_plaintext("test-bootstrap-token").unwrap(),
+            None,
             None,
             None,
             None,

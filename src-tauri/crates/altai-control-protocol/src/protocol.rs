@@ -9,7 +9,9 @@
 use crate::actor::Actor;
 use crate::error::{ControlError, ControlErrorCode};
 use crate::event::{ActivityEvent, ControlEvent, EventKind};
-use crate::id::{OrganizationId, WorkItemId};
+use crate::id::{GoalId, OrganizationId, ProjectId, WorkItemId};
+use crate::revision::Revision;
+use crate::work::{WorkItem, WorkItemKind, WorkStatus};
 use serde::{Deserialize, Serialize};
 
 pub const CONTROL_PLANE_PROTOCOL_VERSION_MAJOR: u16 = 1;
@@ -17,6 +19,11 @@ pub const CONTROL_PLANE_PROTOCOL_VERSION_MINOR: u16 = 0;
 
 pub const DEFAULT_PAGE_LIMIT: u32 = 50;
 pub const MAX_PAGE_LIMIT: u32 = 250;
+
+/// Bounded payload caps for work-item mutations. Every protocol-facing
+/// write honors them so a single command cannot balloon a row.
+pub const MAX_WORK_ITEM_TITLE_BYTES: usize = 200;
+pub const MAX_WORK_ITEM_DESCRIPTION_BYTES: usize = 8_192;
 
 /// Semantic protocol version (major.minor).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -359,6 +366,39 @@ pub struct ActivityQueryRequest {
     pub work_item_id: Option<WorkItemId>,
 }
 
+/// Command payload: create one canonical work item. The caller supplies the
+/// `work_item_id`, so a retried create observes the existing row as a typed
+/// `Conflict` rather than a second row. The birth state is fixed — status
+/// `backlog`, execution phase `none`, revision INITIAL — because create is
+/// birth, not lifecycle; transitions move status afterwards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateWorkItemCommand {
+    /// Organization the work belongs to; carried for event attribution.
+    pub organization_id: OrganizationId,
+    pub project_id: ProjectId,
+    pub work_item_id: WorkItemId,
+    pub goal_id: Option<GoalId>,
+    /// Decomposition only — parentage is never a dependency edge.
+    pub parent_work_item_id: Option<WorkItemId>,
+    pub kind: WorkItemKind,
+    pub title: String,
+    pub description: String,
+}
+
+/// Command payload: transition a work item's status under optimistic
+/// concurrency. `expected_revision` must equal the stored revision or the
+/// command fails typed `StaleRevision` without writing. Execution phase is
+/// dispatch-owned and is never touched by this command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitionWorkItemCommand {
+    /// Organization the work belongs to; carried for event attribution.
+    pub organization_id: OrganizationId,
+    pub project_id: ProjectId,
+    pub work_item_id: WorkItemId,
+    pub to_status: WorkStatus,
+    pub expected_revision: Revision,
+}
+
 /// A protocol-level command, query, or event operation framed by
 /// [`ProtocolRequest`]. Adjacent tagging keeps the wire shape stable and
 /// mirrorable: `{"type": "negotiate_capabilities", "payload": {...}}`.
@@ -368,6 +408,8 @@ pub enum ProtocolCommand {
     NegotiateCapabilities(CapabilityNegotiationRequest),
     QueryActivity(ActivityQueryRequest),
     ReplayEvents(EventReplayRequest),
+    CreateWorkItem(CreateWorkItemCommand),
+    TransitionWorkItem(TransitionWorkItemCommand),
 }
 
 /// The successful payload of a [`ProtocolResponse`] for each
@@ -378,6 +420,10 @@ pub enum ProtocolOutcome {
     Negotiated(CapabilityNegotiationResponse),
     Activity(PageResponse<ActivityEvent>),
     Replayed(EventReplayResponse),
+    /// Read-your-write: the work item as it exists after the create.
+    WorkItemCreated(WorkItem),
+    /// Read-your-write: the work item as it exists after the transition.
+    WorkItemTransitioned(WorkItem),
 }
 
 #[cfg(test)]
@@ -513,11 +559,88 @@ mod tests {
                 next_sequence: 7,
                 has_more: false,
             }),
+            ProtocolOutcome::WorkItemCreated(WorkItem {
+                id: WorkItemId::new("01923abc-def0-7abc-8def-0123456789ab"),
+                project_id: ProjectId::new("proj"),
+                goal_id: None,
+                parent_work_item_id: None,
+                kind: WorkItemKind::Task,
+                title: "Born item".into(),
+                description: String::new(),
+                status: WorkStatus::Backlog,
+                execution_phase: crate::work::ExecutionPhase::None,
+                revision: Revision::INITIAL,
+                created_at: "2026-09-01T00:00:00.000Z".into(),
+                updated_at: "2026-09-01T00:00:00.000Z".into(),
+            }),
+            ProtocolOutcome::WorkItemTransitioned(WorkItem {
+                id: WorkItemId::new("01923abc-def0-7abc-8def-0123456789ab"),
+                project_id: ProjectId::new("proj"),
+                goal_id: None,
+                parent_work_item_id: None,
+                kind: WorkItemKind::Task,
+                title: "Born item".into(),
+                description: String::new(),
+                status: WorkStatus::InProgress,
+                execution_phase: crate::work::ExecutionPhase::None,
+                revision: Revision::new(1),
+                created_at: "2026-09-01T00:00:00.000Z".into(),
+                updated_at: "2026-09-01T00:00:01.000Z".into(),
+            }),
         ];
         for outcome in outcomes {
             let json = serde_json::to_string(&outcome).unwrap();
             let round_trip: ProtocolOutcome = serde_json::from_str(&json).unwrap();
             assert_eq!(round_trip, outcome);
         }
+    }
+
+    #[test]
+    fn work_item_commands_use_stable_adjacent_tagging_and_round_trip() {
+        let create = ProtocolCommand::CreateWorkItem(CreateWorkItemCommand {
+            organization_id: OrganizationId::new("org"),
+            project_id: ProjectId::new("proj"),
+            work_item_id: WorkItemId::new("01923abc-def0-7abc-8def-0123456789ab"),
+            goal_id: None,
+            parent_work_item_id: None,
+            kind: WorkItemKind::Ticket,
+            title: "Ship the thing".into(),
+            description: "with bounded prose".into(),
+        });
+        let json = serde_json::to_value(&create).unwrap();
+        assert_eq!(json["type"], "create_work_item");
+        assert_eq!(json["payload"]["kind"], "ticket");
+        let round_trip: ProtocolCommand = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip, create);
+
+        let transition = ProtocolCommand::TransitionWorkItem(TransitionWorkItemCommand {
+            organization_id: OrganizationId::new("org"),
+            project_id: ProjectId::new("proj"),
+            work_item_id: WorkItemId::new("01923abc-def0-7abc-8def-0123456789ab"),
+            to_status: WorkStatus::InProgress,
+            expected_revision: Revision::INITIAL,
+        });
+        let json = serde_json::to_value(&transition).unwrap();
+        assert_eq!(json["type"], "transition_work_item");
+        assert_eq!(json["payload"]["to_status"], "in_progress");
+        assert_eq!(json["payload"]["expected_revision"], 0);
+        let round_trip: ProtocolCommand = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip, transition);
+    }
+
+    #[test]
+    fn non_canonical_vocabulary_is_rejected_at_deserialization() {
+        let json = serde_json::json!({
+            "type": "transition_work_item",
+            "payload": {
+                "organization_id": OrganizationId::new("org"),
+                "project_id": ProjectId::new("proj"),
+                "work_item_id": WorkItemId::new("wi"),
+                "to_status": "almost_done",
+                "expected_revision": 0,
+            }
+        });
+        let parsed: Result<ProtocolCommand, _> = serde_json::from_value(json);
+        assert!(parsed.is_err(), "a second status model must not parse");
     }
 }

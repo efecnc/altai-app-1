@@ -43,10 +43,12 @@ pub use evidence::Evidence;
 pub use id::*;
 pub use protocol::{
     ActivityQueryRequest, CapabilityNegotiationRequest, CapabilityNegotiationResponse,
-    ControlPlaneCapabilities, DeploymentMode, EventReplayRequest, EventReplayResponse, PageRequest,
-    PageResponse, ProtocolCommand, ProtocolError, ProtocolOutcome, ProtocolRequest,
-    ProtocolResponse, ProtocolVersion, CONTROL_PLANE_PROTOCOL_VERSION_MAJOR,
+    ControlPlaneCapabilities, CreateWorkItemCommand, DeploymentMode, EventReplayRequest,
+    EventReplayResponse, PageRequest, PageResponse, ProtocolCommand, ProtocolError,
+    ProtocolOutcome, ProtocolRequest, ProtocolResponse, ProtocolVersion,
+    TransitionWorkItemCommand, CONTROL_PLANE_PROTOCOL_VERSION_MAJOR,
     CONTROL_PLANE_PROTOCOL_VERSION_MINOR, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
+    MAX_WORK_ITEM_DESCRIPTION_BYTES, MAX_WORK_ITEM_TITLE_BYTES,
 };
 pub use recovery::{RecoveryDisposition, RecoveryRecord};
 pub use registration::{

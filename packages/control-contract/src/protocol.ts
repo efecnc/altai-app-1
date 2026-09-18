@@ -9,7 +9,43 @@
 import { Actor } from "./actor.js";
 import { ControlErrorCode } from "./error.js";
 import { ActivityEvent, ControlEvent, EventKind } from "./event.js";
-import { OrganizationId, WorkItemId } from "./ids.js";
+import { OrganizationId, TypedId, WorkItemId } from "./ids.js";
+import type { Revision } from "./revision.js";
+import type { ControlWorkItem, WorkItemKind, WorkStatus } from "./work.js";
+
+export const MAX_WORK_ITEM_TITLE_BYTES = 200;
+export const MAX_WORK_ITEM_DESCRIPTION_BYTES = 8_192;
+
+/**
+ * Command payload: create one canonical work item. The caller supplies the
+ * work_item_id, so a retried create observes the existing row as a typed
+ * Conflict rather than a second row. Birth state is fixed server-side:
+ * status "backlog", execution_phase "none", revision 0.
+ */
+export interface CreateWorkItemCommand {
+  organization_id: TypedId;
+  project_id: TypedId;
+  work_item_id: TypedId;
+  goal_id: TypedId | null;
+  parent_work_item_id: TypedId | null;
+  kind: WorkItemKind;
+  title: string;
+  description: string;
+}
+
+/**
+ * Command payload: transition a work item's status under optimistic
+ * concurrency. expected_revision must equal the stored revision or the
+ * command fails typed StaleRevision without writing. execution_phase is
+ * dispatch-owned and is never touched by this command.
+ */
+export interface TransitionWorkItemCommand {
+  organization_id: TypedId;
+  project_id: TypedId;
+  work_item_id: TypedId;
+  to_status: WorkStatus;
+  expected_revision: Revision;
+}
 
 export const CONTROL_PLANE_PROTOCOL_VERSION_MAJOR = 1;
 export const CONTROL_PLANE_PROTOCOL_VERSION_MINOR = 0;
@@ -197,10 +233,16 @@ export interface ActivityQueryRequest {
 export type ProtocolCommand =
   | { type: "negotiate_capabilities"; payload: CapabilityNegotiationRequest }
   | { type: "query_activity"; payload: ActivityQueryRequest }
-  | { type: "replay_events"; payload: EventReplayRequest };
+  | { type: "replay_events"; payload: EventReplayRequest }
+  | { type: "create_work_item"; payload: CreateWorkItemCommand }
+  | { type: "transition_work_item"; payload: TransitionWorkItemCommand };
 
 /** The successful payload of a ProtocolResponse for each ProtocolCommand. */
 export type ProtocolOutcome =
   | { type: "negotiated"; payload: CapabilityNegotiationResponse }
   | { type: "activity"; payload: PageResponse<ActivityEvent> }
-  | { type: "replayed"; payload: EventReplayResponse };
+  | { type: "replayed"; payload: EventReplayResponse }
+  /** Read-your-write: the work item as it exists after the create. */
+  | { type: "work_item_created"; payload: ControlWorkItem }
+  /** Read-your-write: the work item as it exists after the transition. */
+  | { type: "work_item_transitioned"; payload: ControlWorkItem };

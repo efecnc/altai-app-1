@@ -6,6 +6,8 @@ import {
   supportsCapability,
   evaluateCapabilityNegotiation,
   createPageRequest,
+  MAX_WORK_ITEM_DESCRIPTION_BYTES,
+  MAX_WORK_ITEM_TITLE_BYTES,
   type ProtocolRequest,
   type ProtocolResponse,
   type PageResponse,
@@ -154,10 +156,83 @@ describe("control protocol contracts", () => {
       },
       { type: "activity", payload: { items: [], has_more: false } },
       { type: "replayed", payload: { events: [], next_sequence: 0, has_more: false } },
+      {
+        type: "work_item_created",
+        payload: {
+          id: { type: "work_item_id", value: "wi_01923abc-def0-7abc-8def-0123456789ab" },
+          project_id: { type: "project_id", value: "proj_01923abc-def0-7abc-8def-0123456789ab" },
+          goal_id: null,
+          parent_work_item_id: null,
+          kind: "task",
+          title: "Launch control plane",
+          description: "Create the federated execution path.",
+          status: "backlog",
+          execution_phase: "none",
+          revision: 0,
+          created_at: "2026-09-18T10:00:00.000Z",
+          updated_at: "2026-09-18T10:00:00.000Z",
+        },
+      },
+      {
+        type: "work_item_transitioned",
+        payload: {
+          id: { type: "work_item_id", value: "wi_01923abc-def0-7abc-8def-0123456789ab" },
+          project_id: { type: "project_id", value: "proj_01923abc-def0-7abc-8def-0123456789ab" },
+          goal_id: null,
+          parent_work_item_id: null,
+          kind: "task",
+          title: "Launch control plane",
+          description: "Create the federated execution path.",
+          status: "in_progress",
+          execution_phase: "none",
+          revision: 1,
+          created_at: "2026-09-18T10:00:00.000Z",
+          updated_at: "2026-09-18T10:00:01.000Z",
+        },
+      },
     ];
     for (const outcome of outcomes) {
       expect(typeof outcome.type).toBe("string");
       expect("payload" in outcome).toBe(true);
     }
+  });
+
+  it("frames work item commands with stable adjacent tagging", () => {
+    const create: ProtocolCommand = {
+      type: "create_work_item",
+      payload: {
+        organization_id: { type: "organization_id", value: "org_local" },
+        project_id: { type: "project_id", value: "proj_proj" },
+        work_item_id: { type: "work_item_id", value: "wi_one" },
+        goal_id: null,
+        parent_work_item_id: null,
+        kind: "ticket",
+        title: "Ship the thing",
+        description: "with bounded prose",
+      },
+    };
+    const json = JSON.stringify(create);
+    expect(json).toContain('"type":"create_work_item"');
+    expect(json).toContain('"kind":"ticket"');
+
+    const transition: ProtocolCommand = {
+      type: "transition_work_item",
+      payload: {
+        organization_id: { type: "organization_id", value: "org_local" },
+        project_id: { type: "project_id", value: "proj_proj" },
+        work_item_id: { type: "work_item_id", value: "wi_one" },
+        to_status: "in_progress",
+        expected_revision: 0,
+      },
+    };
+    const transitionJson = JSON.stringify(transition);
+    expect(transitionJson).toContain('"type":"transition_work_item"');
+    expect(transitionJson).toContain('"to_status":"in_progress"');
+    expect(transitionJson).toContain('"expected_revision":0');
+  });
+
+  it("honors bounded work item prose sizes", () => {
+    expect(MAX_WORK_ITEM_TITLE_BYTES).toBe(200);
+    expect(MAX_WORK_ITEM_DESCRIPTION_BYTES).toBe(8_192);
   });
 });

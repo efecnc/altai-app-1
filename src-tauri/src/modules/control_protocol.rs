@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use altai_control_plane::{
     capabilities_from_wiring, ProtocolDispatcher, SqliteActivityEventRepository,
-    SqliteControlEventRepository,
+    SqliteControlEventRepository, SqliteWorkItemRepository,
 };
 use altai_control_protocol::{
     CapabilityNegotiationRequest, DeploymentMode, ProtocolCommand, ProtocolRequest,
@@ -37,14 +37,20 @@ impl ControlProtocolHost {
         let control_events = std::sync::Arc::new(
             SqliteControlEventRepository::open(database).map_err(|error| error.to_string())?,
         );
+        let work_items = std::sync::Arc::new(
+            SqliteWorkItemRepository::open(database).map_err(|error| error.to_string())?,
+        );
         // Capabilities stay honest: only the protocol-facing repositories
-        // this host wires advertise themselves. Unserved domains answer
-        // typed dispatcher errors, never guesses.
-        let capabilities =
-            capabilities_from_wiring(false, false, false, false, false, false, true, true);
+        // this host wires advertise themselves. Wiring the canonical
+        // work-item store is what flips `work_graph` here; unserved domains
+        // answer typed dispatcher errors, never guesses.
+        let capabilities = capabilities_from_wiring(
+            false, false, false, true, false, false, false, true, true,
+        );
         Ok(Self {
             dispatcher: std::sync::Arc::new(
                 ProtocolDispatcher::new(DeploymentMode::EmbeddedHost, capabilities)
+                    .with_work_item_repository(work_items)
                     .with_activity_repository(activity)
                     .with_control_event_repository(control_events),
             ),
@@ -203,9 +209,13 @@ mod tests {
                 std::sync::Arc::new(SqliteActivityEventRepository::open(&database).unwrap());
             let control_events =
                 std::sync::Arc::new(SqliteControlEventRepository::open(&database).unwrap());
-            let capabilities =
-                capabilities_from_wiring(false, false, false, false, false, false, true, true);
+            let work_items =
+                std::sync::Arc::new(SqliteWorkItemRepository::open(&database).unwrap());
+            let capabilities = capabilities_from_wiring(
+                false, false, false, true, false, false, false, true, true,
+            );
             ProtocolDispatcher::new(DeploymentMode::EmbeddedHost, capabilities)
+                .with_work_item_repository(work_items)
                 .with_activity_repository(activity)
                 .with_control_event_repository(control_events)
         };

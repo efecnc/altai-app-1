@@ -100,3 +100,47 @@ fn project_workspace_fixture_round_trips() {
     let parsed: ProjectWorkspace = serde_json::from_value(value.clone()).unwrap();
     assert_round_trip("project-workspace.json", &value, parsed);
 }
+
+#[test]
+fn work_create_command_fixture_round_trips() {
+    let value = read_fixture("work-create-command.json");
+    let parsed: ProtocolCommand = serde_json::from_value(value.clone()).unwrap();
+    assert!(matches!(
+        parsed,
+        ProtocolCommand::CreateWorkItem(CreateWorkItemCommand { .. })
+    ));
+    assert_round_trip("work-create-command.json", &value, parsed);
+}
+
+#[test]
+fn work_transition_command_fixture_round_trips() {
+    let value = read_fixture("work-transition-command.json");
+    let parsed: ProtocolCommand = serde_json::from_value(value.clone()).unwrap();
+    assert!(matches!(
+        parsed,
+        ProtocolCommand::TransitionWorkItem(TransitionWorkItemCommand { .. })
+    ));
+    assert_round_trip("work-transition-command.json", &value, parsed);
+}
+
+#[test]
+fn work_created_outcome_fixture_round_trips() {
+    let value = read_fixture("work-created-outcome.json");
+    let parsed: ProtocolOutcome = serde_json::from_value(value.clone()).unwrap();
+    assert!(matches!(
+        parsed,
+        ProtocolOutcome::WorkItemCreated(WorkItem { .. })
+    ));
+    assert_round_trip("work-created-outcome.json", &value, parsed);
+}
+
+#[test]
+fn work_transitioned_outcome_fixture_round_trips() {
+    let value = read_fixture("work-transitioned-outcome.json");
+    let parsed: ProtocolOutcome = serde_json::from_value(value.clone()).unwrap();
+    assert!(matches!(
+        parsed,
+        ProtocolOutcome::WorkItemTransitioned(WorkItem { .. })
+    ));
+    assert_round_trip("work-transitioned-outcome.json", &value, parsed);
+}

@@ -5,7 +5,7 @@ use altai_control_plane::{
     SqliteControlEventRepository, SqlitePluginRegistry, SqliteRegistrationRepository,
     SqliteRoutineRepository,
     SqliteRunBindingRepository, SqliteScopeRepository, SqliteWakeRepository,
-    SqliteWorkGraphRepository, DEFAULT_CRON_TICK,
+    SqliteWorkGraphRepository, SqliteWorkItemRepository, DEFAULT_CRON_TICK,
 };
 use altai_core::resolve_workspace;
 use clap::Parser;
@@ -51,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     scope_repository.ensure_default_local_organization()?;
     let agent_repository = Arc::new(SqliteAgentRepository::open(&work_db)?);
     let work_graph_repository = Arc::new(SqliteWorkGraphRepository::open(&work_db)?);
+    let work_item_repository = Arc::new(SqliteWorkItemRepository::open(&work_db)?);
     let wake_repository = Arc::new(SqliteWakeRepository::open(&work_db)?);
     let run_binding_repository = Arc::new(SqliteRunBindingRepository::open(&work_db)?);
     let attempt_repository = Arc::new(SqliteAttemptRepository::open(&work_db)?);
@@ -84,6 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(scope_repository),
             Some(agent_repository),
             Some(work_graph_repository),
+            Some(work_item_repository),
             wake_repository,
             Some(run_binding_repository),
             Some(attempt_repository),
