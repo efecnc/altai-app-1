@@ -765,6 +765,7 @@ impl HostAdapter for StdioHost {
                 checkpoint_root,
                 scripted_responses: scripted,
                 channel_name: "stdio",
+                suppress_agent_cron: false,
             },
         )
         .await

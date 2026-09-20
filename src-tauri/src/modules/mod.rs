@@ -1,4 +1,5 @@
 pub mod app_menu;
+pub mod control_plane_flags;
 pub mod control_protocol;
 pub mod fs;
 pub mod git;

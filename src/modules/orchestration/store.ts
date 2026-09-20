@@ -29,6 +29,9 @@ type State = {
   errors: Record<string, string | null>;
   pending: Record<string, boolean>;
   restored: Record<string, boolean>;
+  /** Per-workspace: canonical scheduling owns the ledger, the renderer tick
+   *  only observes (CP-08-108). */
+  schedulingSuppressed: Record<string, boolean>;
   load: (workspaceKey: string) => Promise<void>;
   loadWorkflow: (workspaceKey: string) => Promise<OrchestrationWorkflowDocument>;
   saveWorkflow: (
@@ -43,6 +46,7 @@ type State = {
     snapshot: OrchestrationSnapshot,
   ) => void;
   setError: (workspaceKey: string, error: string | null) => void;
+  setSchedulingSuppressed: (workspaceKey: string, value: boolean) => void;
 };
 
 const persistence = createAppStore("altai-orchestration.json", {
@@ -74,6 +78,7 @@ export const useOrchestrationStore = create<State>((set, get) => ({
   errors: {},
   pending: {},
   restored: {},
+  schedulingSuppressed: {},
 
   setSnapshot: (workspaceKey, snapshot) =>
     set((state) => ({
@@ -84,6 +89,18 @@ export const useOrchestrationStore = create<State>((set, get) => ({
     set((state) => ({
       errors: { ...state.errors, [workspaceKey]: error },
     })),
+
+  setSchedulingSuppressed: (workspaceKey, value) =>
+    set((state) => {
+      // The tick runs every 1.5s; skip notifies while the value is unchanged.
+      if (state.schedulingSuppressed[workspaceKey] === value) return state;
+      return {
+        schedulingSuppressed: {
+          ...state.schedulingSuppressed,
+          [workspaceKey]: value,
+        },
+      };
+    }),
 
   loadWorkflow: async (workspaceKey) => {
     const document = await native.orchestrationWorkflowLoad(workspaceKey);

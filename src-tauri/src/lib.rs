@@ -3,7 +3,8 @@ mod modules;
 
 use altai::agent::commands as agent_commands;
 use modules::{
-    app_menu, control_protocol, external_sync, fs, git, github, gmail, lsp_install, mcp, net,
+    app_menu, control_plane_flags, control_protocol, external_sync, fs, git, github, gmail,
+    lsp_install, mcp, net,
     notebook, orchestration, os_menu, proc, pty, routines, secrets, shell, webview, work,
     work_import, workspace,
 };
@@ -823,6 +824,7 @@ pub fn run() {
             work::work_review,
             work_import::work_legacy_import_preview,
             // ALTAI — Work OS control protocol (CP-08-45)
+            control_plane_flags::control_plane_scheduling_authority,
             control_protocol::control_protocol_negotiate,
             control_protocol::control_protocol_execute,
             net::lm_ping,

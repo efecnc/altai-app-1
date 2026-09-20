@@ -44,12 +44,31 @@ function latestTodoAssignments(assignments: Assignment[]): Map<string, Assignmen
   return latest;
 }
 
-async function reconcile(workspaceKey: string): Promise<void> {
+// Exported for tests: the tick body is the renderer half of the CP-08-108
+// scheduling cutover and its claim/dispatch gating is load-bearing.
+export async function reconcile(workspaceKey: string): Promise<void> {
   const orchestration = useOrchestrationStore.getState();
   await orchestration.loadWorkflow(workspaceKey);
   const snapshot = await native.orchestrationSnapshot(workspaceKey);
   orchestration.setSnapshot(workspaceKey, snapshot);
   if (snapshot.status !== "running" || !snapshot.taskSessionId) return;
+  // Scheduling cutover (CP-08-108): once canonical scheduling owns this
+  // workspace the renderer stops making claim/dispatch decisions — exactly
+  // one scheduler exists — but the observation duties below (todo hydrate +
+  // terminal recording) are bookkeeping, not scheduling, so they keep
+  // running. An early return here would silently freeze a legacy session
+  // that is still RUNNING at cutover.
+  let schedulingSuppressed = false;
+  try {
+    const authority = await native.schedulingAuthority(workspaceKey);
+    schedulingSuppressed = authority.canonical;
+  } catch (cause) {
+    // An unreadable authority leaves legacy behavior untouched.
+    console.error(
+      `Scheduling authority lookup failed for ${workspaceKey}; using legacy scheduling:`,
+      cause,
+    );
+  }
   if (!useAssignmentsStore.getState().hydrated) return;
   const workflow = orchestration.effectiveWorkflows[workspaceKey];
   if (!workflow) return;
@@ -82,6 +101,14 @@ async function reconcile(workspaceKey: string): Promise<void> {
       );
     }
   }
+
+  // The claim/dispatch gate itself: canonical scheduling owns the work
+  // ledger, so the renderer must not claim or dispatch. The per-workspace
+  // flag lets the UI reflect that this workspace is scheduler-owned.
+  useOrchestrationStore
+    .getState()
+    .setSchedulingSuppressed(workspaceKey, schedulingSuppressed);
+  if (schedulingSuppressed) return;
 
   const candidates = todos.flatMap((todo) => {
     if (todo.origin !== "manual" || todo.status === "completed") return [];

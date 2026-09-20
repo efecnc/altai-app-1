@@ -360,6 +360,25 @@ pub fn orchestration_stop(
     Ok(snapshot(runtime))
 }
 
+/// The claim-time scheduling-authority consult backing `orchestration_reconcile`
+/// (CP-08-108). The renderer gates its own dispatch, but that gate can race a
+/// flag flip by up to one tick, so reconcile re-reads the ledger before
+/// claiming. A workspace that never materialized a `work.db` is legacy by
+/// definition — flags cannot be canonical without it — and is answered
+/// without opening the ledger, which would create the database as a side
+/// effect of a read.
+fn scheduling_claims_suppressed(workspace_key: &str) -> bool {
+    let root = std::path::Path::new(workspace_key);
+    let Ok(paths) = altai_core::resolve_workspace_from(Some(root), root) else {
+        return false;
+    };
+    let work_db = paths.work_db();
+    if !work_db.exists() {
+        return false;
+    }
+    crate::altai::agent::desktop_host::canonical_scheduling_suppresses_fires(&paths.root)
+}
+
 #[tauri::command]
 pub fn orchestration_reconcile(
     workspace_key: String,
@@ -367,6 +386,9 @@ pub fn orchestration_reconcile(
     state: State<'_, OrchestrationState>,
 ) -> Result<ReconcileResult, String> {
     let workspace_key = clean_workspace_key(workspace_key)?;
+    // Consulted before the state lock so the ledger read never blocks other
+    // workspaces' orchestration state.
+    let claims_suppressed = scheduling_claims_suppressed(&workspace_key);
     let mut runtimes = state
         .0
         .lock()
@@ -376,6 +398,16 @@ pub fn orchestration_reconcile(
     runtime.active_count = input.active_keys.len();
 
     if runtime.status != OrchestrationStatus::Running {
+        return Ok(ReconcileResult {
+            claims: Vec::new(),
+            snapshot: snapshot(runtime),
+        });
+    }
+
+    // Scheduling cutover (CP-08-108): when canonical scheduling owns this
+    // workspace, renderer candidates are not claimed — a typed no-op. The
+    // bookkeeping above stays live so the snapshot keeps observing state.
+    if claims_suppressed {
         return Ok(ReconcileResult {
             claims: Vec::new(),
             snapshot: snapshot(runtime),
@@ -600,5 +632,50 @@ mod tests {
         assert!(clean_workspace_key(" ".into()).is_err());
         assert!(clean_task_key("".into()).is_err());
         assert!(clean_task_key("todo-1".into()).is_ok());
+    }
+
+    #[test]
+    fn claim_consult_keeps_legacy_without_a_materialized_work_db() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        assert!(!scheduling_claims_suppressed(
+            &root.to_string_lossy()
+        ));
+        let work_db = altai_core::resolve_workspace_from(Some(root), root)
+            .unwrap()
+            .work_db();
+        assert!(
+            !work_db.exists(),
+            "a reconcile-time authority consult must not create work.db"
+        );
+    }
+
+    #[test]
+    fn claim_consult_suppresses_claims_when_canonical_scheduling_owns_the_workspace() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let work_db = altai_core::resolve_workspace_from(Some(root), root)
+            .unwrap()
+            .work_db();
+        std::fs::create_dir_all(work_db.parent().unwrap()).unwrap();
+        use altai_control_plane::FeatureFlagRepository;
+        let ledger = altai_control_plane::SqliteFeatureFlagRepository::open(&work_db).unwrap();
+        ledger.set("control_plane_enabled", "true").unwrap();
+        drop(ledger);
+        assert!(scheduling_claims_suppressed(&root.to_string_lossy()));
+    }
+
+    #[test]
+    fn claim_consult_keeps_claims_when_the_work_db_exists_but_flags_are_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let work_db = altai_core::resolve_workspace_from(Some(root), root)
+            .unwrap()
+            .work_db();
+        std::fs::create_dir_all(work_db.parent().unwrap()).unwrap();
+        let _ledger = altai_control_plane::SqliteFeatureFlagRepository::open(&work_db).unwrap();
+        assert!(!scheduling_claims_suppressed(
+            &root.to_string_lossy()
+        ));
     }
 }

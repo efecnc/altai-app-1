@@ -32,6 +32,10 @@ pub struct SharedInstanceHooks {
     pub scripted_responses: Option<Vec<String>>,
     /// `"tauri"` or `"stdio"`.
     pub channel_name: &'static str,
+    /// Scheduling cutover (CP-08-108): withhold the agent-facing `cron` tool
+    /// because canonical scheduling owns this workspace — an automation
+    /// created through it would be suppressed at fire time and never mapped.
+    pub suppress_agent_cron: bool,
 }
 
 impl Default for SharedInstanceHooks {
@@ -40,6 +44,7 @@ impl Default for SharedInstanceHooks {
             checkpoint_root: None,
             scripted_responses: None,
             channel_name: "tauri",
+            suppress_agent_cron: false,
         }
     }
 }
@@ -264,12 +269,7 @@ where
         .to_string();
     // CronTool binds its destination to IsanAgent's trusted ToolExecCtx
     // (#67), while the actor itself is shared at workspace scope above.
-    tools.register(Box::new(CronTool {
-        cron_node,
-        multi_tenant_edge_cron_enabled: false,
-        mte_cron_scheduler: None,
-        db_path: cron_db_path,
-    }));
+    register_cron_tool(&mut tools, &hooks, cron_node, cron_db_path);
     tools.register(Box::new(TodoWriteTool {
         memory_node: memory_node.clone(),
     }));
@@ -976,6 +976,29 @@ where
     })
 }
 
+/// Register the agent-facing `cron` tool unless the host reports canonical
+/// scheduling as owning this workspace (CP-08-108). Withholding the tool is
+/// the typed-closed refusal: an automation created through it would join the
+/// retired legacy firing path and be suppressed at fire time, never mapped
+/// into the canonical ledger.
+fn register_cron_tool(
+    tools: &mut ToolRegistry,
+    hooks: &SharedInstanceHooks,
+    cron_node: NodeHandle<String>,
+    cron_db_path: String,
+) {
+    if hooks.suppress_agent_cron {
+        log::info!("cron tool withheld: canonical scheduling owns this workspace");
+        return;
+    }
+    tools.register(Box::new(CronTool {
+        cron_node,
+        multi_tenant_edge_cron_enabled: false,
+        mte_cron_scheduler: None,
+        db_path: cron_db_path,
+    }));
+}
+
 pub fn register_existing_claw_tools(
     tools: &mut ToolRegistry,
     memory_node: NodeHandle<isanagent::memory::MemoryMessage>,
@@ -991,4 +1014,40 @@ pub fn register_existing_claw_tools(
         memory_node: memory_node.clone(),
     }));
     tools.register(Box::new(FetchMemoryByDateTool { memory_node }));
+}
+
+#[cfg(test)]
+mod cron_tool_registration_tests {
+    use super::*;
+
+    /// A live-typed handle with no spawned actor behind it — registration
+    /// only stores the tool, it never talks to the cron actor.
+    fn test_cron_node() -> NodeHandle<String> {
+        NodeHandle::create_listener("cron-test", 8).0
+    }
+
+    #[test]
+    fn cron_tool_is_withheld_when_canonical_scheduling_suppresses_fires() {
+        let mut tools = ToolRegistry::new();
+        let hooks = SharedInstanceHooks {
+            suppress_agent_cron: true,
+            ..Default::default()
+        };
+        register_cron_tool(&mut tools, &hooks, test_cron_node(), "db".to_string());
+        assert!(
+            !tools.get_tool_names().iter().any(|name| name == "cron"),
+            "the agent-facing cron tool must be absent under canonical scheduling"
+        );
+    }
+
+    #[test]
+    fn cron_tool_registers_when_scheduling_is_legacy() {
+        let mut tools = ToolRegistry::new();
+        let hooks = SharedInstanceHooks::default();
+        register_cron_tool(&mut tools, &hooks, test_cron_node(), "db".to_string());
+        assert!(
+            tools.get_tool("cron").is_some(),
+            "legacy workspaces keep the agent-facing cron tool"
+        );
+    }
 }

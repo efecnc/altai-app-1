@@ -55,6 +55,28 @@ impl SqliteWorkItemRepository {
             connection: Mutex::new(connection),
         })
     }
+    /// Create a work item on a caller-owned connection, so a multi-write
+    /// flow (the cron automation transfer's per-automation transaction)
+    /// commits its work item and its bookkeeping atomically. Same write as
+    /// [`WorkItemRepository::create`], minus the project check the caller
+    /// is expected to have performed.
+    pub fn create_in(
+        connection: &Connection,
+        item: WorkItem,
+    ) -> Result<(), WorkItemRepositoryError> {
+        let payload =
+            serde_json::to_string(&item).map_err(|error| WorkItemRepositoryError::Internal {
+                reason: error.to_string(),
+            })?;
+        let inserted = connection.execute("INSERT INTO control_plane_work_items (id, project_id, payload_json) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO NOTHING", params![item.id.value, item.project_id.value, payload]).map_err(Self::db)?;
+        if inserted == 1 {
+            Ok(())
+        } else {
+            Err(WorkItemRepositoryError::AlreadyExists {
+                work_item_id: item.id.value,
+            })
+        }
+    }
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, WorkItemRepositoryError> {
         self.connection
             .lock()
@@ -76,18 +98,8 @@ impl SqliteWorkItemRepository {
 impl WorkItemRepository for SqliteWorkItemRepository {
     fn create(&self, item: WorkItem) -> Result<(), WorkItemRepositoryError> {
         self.project_organization(&item.project_id)?;
-        let payload =
-            serde_json::to_string(&item).map_err(|error| WorkItemRepositoryError::Internal {
-                reason: error.to_string(),
-            })?;
-        let inserted = self.lock()?.execute("INSERT INTO control_plane_work_items (id, project_id, payload_json) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO NOTHING", params![item.id.value, item.project_id.value, payload]).map_err(Self::db)?;
-        if inserted == 1 {
-            Ok(())
-        } else {
-            Err(WorkItemRepositoryError::AlreadyExists {
-                work_item_id: item.id.value,
-            })
-        }
+        let connection = self.lock()?;
+        Self::create_in(&connection, item)
     }
     fn get(&self, id: &WorkItemId) -> Result<WorkItem, WorkItemRepositoryError> {
         let payload: Option<String> = self
