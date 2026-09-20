@@ -3,9 +3,9 @@
 > **Rule:** This file is updated **only** when a task is accepted (merged/reviewed),
 > not when an agent says it finished. It records canonical progress.
 >
-> **Date:** 2026-09-18
+> **Date:** 2026-09-20
 >
-> **Last updated by:** Cutover slice B acceptance through PR #84
+> **Last updated by:** Scheduler transfer (cutover slice C.a) acceptance through PR #86
 
 ## Accepted Tasks
 
@@ -46,6 +46,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 | CP-08 (103) | accepted | fork PR #76 / `7cfb9ee8` | 2026-08-22 | Legacy read-only importer boundary defined (`LEGACY_IMPORTER_DISCOVERY.md`): assignments are the primary source, manual todos join with named identity gaps PR 2 closes in scope, orchestration intents and IsanAgent-owned notifications are excluded with cited rationale; idempotency rides a dedicated mapping table on the fail-closed `legacy_work_bridge` pattern |
 | CP-08 (104) | accepted | fork PR #78 / `34b4c646` | 2026-08-23 | The importer shipped: read-only projection of legacy assignments and manual todos into canonical Work items through `control_plane_legacy_import_mappings` with length-framed keys and content-hash idempotency (identical re-import writes nothing, changed content updates exactly one row under optimistic concurrency, nothing deletes); statuses stay verbatim provenance, attribution is caller-supplied fail-closed, inputs are size-capped metadata-first — completing package 100's exit gate |
 | CP-08 (105) | accepted | fork PR #80 | 2026-08-23 | Cutover discovery recorded (`SINGLE_WRITER_CUTOVER_DISCOVERY.md`): the single-writer gate is violated by design today — two table families with live writers share one `work.db`, every mutation bypasses the read-only dispatcher, and cross-binary pairings (incl. one-shot CLI `work` commands opening `WorkStore` directly) are unarbitrated; ten writer classes inventoried and a staged plan set — lock inside `WorkStore::open`, flag ledger, dispatcher mutation surface, then per-domain transfers |
+| CP-08 (108) | accepted | fork PR #86 | 2026-09-20 | Slice C.a shipped: scheduling authority became a ledger-recorded fact — schema v6 `control_plane_cron_automation_mappings` plus `schedule_owner` (desktop_host\|daemon) and `legacy_cron_compatibility` flags in `control_plane_feature_flags`; `SingleWriterScheduler` gained its first host drivers (desktop `SchedulerDriver`, authority-gated daemon `RoutineCronBridge` holding the slice-A workspace lock only as the named owner, idling and releasing otherwise, legacy tick unconditional without the lock when the ledger is undecided); CronActor automations snapshot idempotently, each automation in one immediate transaction (automation_id + content_hash → WorkItem/Routine/mapping row, paused → `Paused`, At/Every → disposition `incompatible`) behind a new daemon `schedule snapshot\|enable\|status` operator surface enforcing the freeze order with insert-only flag writes; mechanical freeze at fire time with a last-known-authority cache, agent CronTool withheld when canonical scheduling owns the workspace, renderer reconcile keeps hydrate/record_terminal bookkeeping but loses claim/dispatch (backend claim consult + per-workspace suppression flag); undecided/rollback legacy tick excludes mapped mirrors so exactly one authority drives in every reachable ledger state; flag-off/absent is byte-for-byte legacy; two adversarial review rounds (1 CRITICAL + 5 HIGH, then 1 HIGH + 1 MEDIUM) resolved in-scope, re-check ACCEPT both lanes; Amazon Q clean |
 | CP-08 (107) | accepted | fork PR #84 | 2026-09-18 | Slice B shipped: the versioned protocol dispatcher grew a canonical work-item mutation surface (`create_work_item` / `transition_work_item` backed by `SqliteWorkItemRepository`) following the eight-step command pattern — version gate, capability, wiring, input validation, scope resolution, invariants, optimistic persist, attributed audit; birth fixed at backlog/none/INITIAL, `execution_phase` never protocol-written; duplicate create → typed `Conflict`, stale revision → typed `StaleRevision`; activity + control events derived from the item revision (retries re-observe their own trail); `work_graph` capability now honestly derived from the full mutation surface with a structural audit-wiring gate; command `organization_id` bound to the project's actual organization (cross-org attribution fails closed); desktop, CLI serve and daemon wire the store; TS mirror + 4 golden fixtures + local==deployed conformance incl. a barrier-synchronized CAS race test; adversarial review ACCEPT-WITH-NITS with all three MEDIUMs resolved in-scope |
 | CP-08 (106) | accepted | fork PR #82 | 2026-08-24 | Slice A shipped: advisory workspace lock inside `WorkStore::open` (flock/LockFileEx, kernel-released, `WorkspaceHeld` typed failure — covers desktop, CLI serve and one-shot doors structurally), `control_plane_feature_flags` ledger + schema v5 with `control_plane_enabled`, race-safe cached `Arc<WorkStore>` so the desktop holds its workspace's single-writer lock for the app run while external CLI processes fail typed-closed (-32005); migration checkpoint made race-safe with INSERT OR IGNORE |
 
@@ -76,7 +77,7 @@ All current and future ordering comes from `WORK_OS_PROGRAM_BACKLOG.md`.
 
 | Task ID | Risk | Depends on | Status |
 | --- | --- | --- | --- |
-| CP-08-108 | B | CP-08-107 | ready — single-writer scheduler transfer (Package 101 slice C.a per SINGLE_WRITER_CUTOVER_DISCOVERY §4.3.a) |
+| CP-08-109 | B | CP-08-108 | ready — assignments/todos import cutover (Package 101 slice C.b per SINGLE_WRITER_CUTOVER_DISCOVERY §4.3.b) |
 
 ## Known Failing Tests / Blockers
 
