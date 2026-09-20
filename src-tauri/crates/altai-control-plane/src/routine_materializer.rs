@@ -56,8 +56,26 @@ impl RoutineMaterializer {
     /// the number of wakes enqueued. Idempotent within a period: a second call at
     /// the same `now` enqueues nothing because the anchor advanced to the fire.
     pub fn materialize_due(&self, now_unix_seconds: u64) -> Result<usize, RoutineMaterializationError> {
+        self.materialize_due_excluding(now_unix_seconds, &[])
+    }
+
+    /// The same scan, skipping every routine whose id is in
+    /// `excluded_routine_ids`. The scheduling cutover's legacy tick path
+    /// passes the mapped routine ids here: a mapped routine is a mirror of a
+    /// live legacy automation the legacy authorities still drive, and driving
+    /// the mirror too would fire the automation twice. The canonical paths
+    /// pass nothing — once the ledger names an owner, that owner drives
+    /// every active routine.
+    pub fn materialize_due_excluding(
+        &self,
+        now_unix_seconds: u64,
+        excluded_routine_ids: &[String],
+    ) -> Result<usize, RoutineMaterializationError> {
         let mut enqueued = 0;
         for routine in self.routines.list_active()? {
+            if excluded_routine_ids.contains(&routine.id.value) {
+                continue;
+            }
             let Some(revision_id) = routine.current_revision_id else {
                 continue;
             };
@@ -277,5 +295,29 @@ mod tests {
         recurring_routine(&routines, "good", "* * * * *", 0);
 
         assert_eq!(materializer.materialize_due(60).unwrap(), 1);
+    }
+
+    /// N1 regression: the legacy tick's exclusion seam. An excluded routine
+    /// materializes nothing while its un-excluded peer does, and its anchor
+    /// stays put — the undecided/rollback bridge path passes the mapped
+    /// mirror ids through exactly this parameter.
+    #[test]
+    fn excluded_routine_ids_materialize_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (materializer, routines, wakes) = materializer(&dir);
+        recurring_routine(&routines, "mirror", "* * * * *", 0);
+        recurring_routine(&routines, "free", "* * * * *", 0);
+
+        let enqueued = materializer
+            .materialize_due_excluding(60, &[RoutineId::new("mirror").value])
+            .unwrap();
+        assert_eq!(enqueued, 1, "only the un-excluded routine materializes");
+        assert!(wakes.claim_wake(&WorkItemId::new("work-1"), "now".into()).is_ok());
+        assert_eq!(
+            routines.last_fired(&RoutineId::new("mirror")).unwrap(),
+            None,
+            "the excluded routine's anchor must not advance"
+        );
+        assert_eq!(routines.last_fired(&RoutineId::new("free")).unwrap(), Some(60));
     }
 }

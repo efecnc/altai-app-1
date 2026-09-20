@@ -75,6 +75,10 @@ pub enum TransferError {
     /// The attribution's project does not exist or belongs to another
     /// organization.
     ProjectResolution { reason: String },
+    /// Retirement was requested for an automation with no mapping row:
+    /// only a snapshotted automation can be retired, so the bookkeeping
+    /// refuses instead of silently no-oping.
+    MappingMissing { automation_id: String },
     Database { reason: String },
 }
 
@@ -96,6 +100,10 @@ impl std::fmt::Display for TransferError {
                     .join(", ")
             ),
             Self::ProjectResolution { reason } => write!(f, "{reason}"),
+            Self::MappingMissing { automation_id } => write!(
+                f,
+                "automation {automation_id} has no mapping row; retirement bookkeeping requires a snapshotted automation"
+            ),
             Self::Database { reason } => write!(f, "cron automation transfer failed: {reason}"),
         }
     }
@@ -378,15 +386,38 @@ impl SqliteCronAutomationTransfer {
     }
 
     /// Retirement bookkeeping on the mapping row. Enforcement lives in the
-    /// desktop host's fire-time gate; this only records the fact.
+    /// desktop host's fire-time gate; this only records the fact. Idempotent
+    /// for an already-retired row; a missing mapping row is a typed error,
+    /// never a silent no-op.
     pub fn mark_retired(&self, automation_id: &str) -> Result<(), TransferError> {
-        self.lock()?
+        let connection = self.lock()?;
+        let touched = connection
             .execute(
                 "UPDATE control_plane_cron_automation_mappings SET retired_at_unix_seconds = ?2 WHERE automation_id = ?1 AND retired_at_unix_seconds IS NULL",
                 params![automation_id, now_unix_seconds() as i64],
             )
             .map_err(Self::db)?;
-        Ok(())
+        if touched == 1 {
+            return Ok(());
+        }
+        // Zero rows means either an already-retired row (idempotent) or a
+        // missing one (refuse typed).
+        let exists: bool = connection
+            .query_row(
+                "SELECT 1 FROM control_plane_cron_automation_mappings WHERE automation_id = ?1",
+                [&automation_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(Self::db)?
+            .is_some();
+        if exists {
+            Ok(())
+        } else {
+            Err(TransferError::MappingMissing {
+                automation_id: automation_id.to_string(),
+            })
+        }
     }
 
     /// Read-only transfer state of every active automation, for operator
@@ -415,6 +446,33 @@ impl SqliteCronAutomationTransfer {
             });
         }
         Ok(rows)
+    }
+
+    /// The routine ids of every mapped automation: the set a legacy-path
+    /// scheduler must not drive. A mapped routine is a snapshot mirror of a
+    /// live legacy automation that the legacy authorities (the desktop's
+    /// CronActor over `cron_jobs`) still drive while the ledger is undecided
+    /// or rolled back, so materializing the mirror would drive the
+    /// automation twice. Retired rows are included on purpose: after a
+    /// rollback the legacy row fires again while its mirror must stay
+    /// dormant. Zero rows (no snapshot has run) yield an empty set and any
+    /// filter built on it is a no-op.
+    pub fn mapped_routine_ids(&self) -> Result<Vec<String>, TransferError> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT routine_id FROM control_plane_cron_automation_mappings
+                 WHERE disposition = 'mapped' AND routine_id IS NOT NULL",
+            )
+            .map_err(Self::db)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(Self::db)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(Self::db)?);
+        }
+        Ok(ids)
     }
 
     /// Deterministic canonical mapping for one automation, written on the
@@ -1028,7 +1086,7 @@ mod tests {
         }
         // Break the routine write so the per-automation transaction fails
         // after the work item insert has already succeeded.
-        Connection::open(&h._dir.path().join("work.db"))
+        Connection::open(h._dir.path().join("work.db"))
             .unwrap()
             .execute("DROP TABLE control_plane_routines", [])
             .unwrap();
@@ -1038,7 +1096,7 @@ mod tests {
             .expect_err("a broken routine write must fail the snapshot");
         assert!(matches!(error, TransferError::Database { .. }));
         // The work item insert rolled back with it.
-        let work_items: i64 = Connection::open(&h._dir.path().join("work.db"))
+        let work_items: i64 = Connection::open(h._dir.path().join("work.db"))
             .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM control_plane_work_items",
@@ -1102,5 +1160,61 @@ mod tests {
             }
             other => panic!("expected EnableBlocked, got {other:?}"),
         }
+    }
+
+    /// N2 regression: retiring an automation with no mapping row is a typed
+    /// refusal, never a silent no-op — while an already-retired row stays an
+    /// idempotent Ok (the double-retire above).
+    #[test]
+    fn retiring_an_unmapped_automation_is_a_typed_error() {
+        let h = harness();
+        let error = h
+            .transfer
+            .mark_retired("never-snapshotted")
+            .expect_err("a missing mapping row must refuse typed");
+        assert_eq!(
+            error,
+            TransferError::MappingMissing {
+                automation_id: "never-snapshotted".to_string(),
+            }
+        );
+    }
+
+    /// N1 regression: the legacy-path exclusion set is exactly the mapped
+    /// routine ids — incompatible rows (no routine) contribute nothing, and
+    /// retired rows stay included because a rolled-back enable must keep
+    /// the mirror dormant while legacy fires again.
+    #[test]
+    fn mapped_routine_ids_lists_mapped_mirrors_only() {
+        let h = harness();
+        {
+            let connection = Connection::open(&h.memory_db).unwrap();
+            insert_job(
+                &connection,
+                "job-cron",
+                r#"{"kind":"Cron","cron_expr":"0 9 * * MON"}"#,
+                "Weekly report",
+            );
+            insert_job(
+                &connection,
+                "job-every",
+                r#"{"kind":"Every","every_ms":90000}"#,
+                "Interval job",
+            );
+        }
+        h.transfer
+            .snapshot(&h.memory_db, &h.attribution, &h.work_items)
+            .unwrap();
+        assert_eq!(
+            h.transfer.mapped_routine_ids().unwrap(),
+            vec![RoutineId::new("snap_job-cron").value],
+            "only the Cron-mapped mirror is a legacy-tick exclusion"
+        );
+        h.transfer.mark_retired("job-cron").unwrap();
+        assert_eq!(
+            h.transfer.mapped_routine_ids().unwrap(),
+            vec![RoutineId::new("snap_job-cron").value],
+            "a retired mapping still excludes its mirror: rollback keeps it dormant"
+        );
     }
 }
