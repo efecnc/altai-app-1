@@ -1,21 +1,24 @@
 use altai_control_plane::{
     router_with_control_repositories, BootstrapCredential, ControlPlane, ControlPlaneConfig,
-    ControlPlaneStore, RoutineCronBridge, RoutineMaterializer, SqliteActivityEventRepository,
-    SqliteAgentRepository, SqliteApprovalRepository, SqliteAttemptRepository,
-    SqliteControlEventRepository, SqliteFeatureFlagRepository, SqlitePluginRegistry,
-    SqliteRegistrationRepository,
-    SqliteRoutineRepository,
-    SqliteRunBindingRepository, SqliteScopeRepository, SqliteWakeRepository,
-    SqliteWorkGraphRepository, SqliteWorkItemRepository, DEFAULT_CRON_TICK,
+    ControlPlaneStore, FeatureFlagRepository, RoutineCronBridge, RoutineMaterializer,
+    SqliteActivityEventRepository, SqliteAgentRepository, SqliteApprovalRepository,
+    SqliteAttemptRepository, SqliteControlEventRepository, SqliteCronAutomationTransfer,
+    SqliteFeatureFlagRepository, SqlitePluginRegistry, SqliteRegistrationRepository,
+    SqliteRoutineRepository, SqliteRunBindingRepository, SqliteScopeRepository,
+    SqliteWakeRepository, SqliteWorkGraphRepository, SqliteWorkItemRepository, TransferAttribution,
+    CONTROL_PLANE_ENABLED_FLAG, DEFAULT_CRON_TICK, LEGACY_CRON_COMPATIBILITY_FLAG,
+    SCHEDULE_OWNER_DAEMON, SCHEDULE_OWNER_DESKTOP, SCHEDULE_OWNER_FLAG,
 };
+use altai_control_protocol::{Actor, OrganizationId, ProjectId};
 use altai_core::resolve_workspace;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::{net::SocketAddr, sync::Arc};
 
 #[derive(Parser)]
 #[command(
     name = "altai-control-plane",
-    about = "ALTAI authenticated control-plane daemon"
+    about = "ALTAI authenticated control-plane daemon",
+    subcommand_negates_reqs = true
 )]
 struct Args {
     /// Loopback listener. Non-loopback listeners require a future TLS/proxy deployment path.
@@ -27,11 +30,59 @@ struct Args {
     /// Bootstrap bearer credential. Prefer ALTAI_CONTROL_PLANE_BOOTSTRAP_TOKEN.
     #[arg(long, env = "ALTAI_CONTROL_PLANE_BOOTSTRAP_TOKEN")]
     bootstrap_token: String,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Scheduling-cutover transfer surface (CP-08-108): freeze the legacy
+    /// cron automations, then cut the workspace's schedule over to a named
+    /// owner. The steps are separate commands so each is inspectable; the
+    /// freeze order snapshot → verify → flags → retire is enforced inside
+    /// `enable`.
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScheduleAction {
+    /// Map every active legacy automation into canonical work items and
+    /// routines. Idempotent; re-runs with unchanged content write nothing.
+    Snapshot {
+        /// Organization the transferred work items are attributed to.
+        #[arg(long)]
+        organization: String,
+        /// Project the transferred work items land in (must belong to the
+        /// organization).
+        #[arg(long)]
+        project: String,
+    },
+    /// Verify every active automation is mapped and compatible (typed-closed
+    /// otherwise), record the schedule owner and `control_plane_enabled` as
+    /// insert-only flag writes, then retire the mapped legacy rows.
+    Enable {
+        /// Schedule owner to record: `daemon` or `desktop_host`.
+        #[arg(long)]
+        owner: String,
+    },
+    /// Print the ledger flags and the transfer state of every active
+    /// legacy automation.
+    Status,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    match args.command {
+        Some(Command::Schedule { action }) => run_schedule(args.workspace, action),
+        None => serve(args).await,
+    }
+}
+
+async fn serve(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if !args.bind.ip().is_loopback() {
         return Err("control-plane daemon only permits loopback bind in this milestone".into());
     }
@@ -62,11 +113,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let control_event_repository =
         Arc::new(SqliteControlEventRepository::open(&work_db)?);
     let plugin_registry = Arc::new(SqlitePluginRegistry::open(&work_db)?);
-    // Managed cron bridge under the scheduling cutover's authority gate: the
-    // loop re-reads the feature-flag ledger every tick and materializes only
-    // while this daemon is the named schedule owner (holding the workspace
-    // single-writer lock). Flag-free deployments stay byte-for-byte idle
-    // here — which is exactly today's unconditional behavior, gated.
+    // Managed cron bridge under the scheduling cutover's authority gate:
+    // each tick re-reads the feature-flag ledger. A decided ledger that
+    // names this daemon drives canonically while holding the workspace
+    // single-writer lock; an undecided ledger (every flag absent — the
+    // state of every deployment that predates the cutover) or a pulled
+    // rollback switch keeps the byte-for-byte legacy tick running
+    // unconditionally, without the lock.
     let materializer = Arc::new(RoutineMaterializer::new(
         routine_repository.clone(),
         wake_repository.clone(),
@@ -106,4 +159,127 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     Ok(())
+}
+
+/// The `schedule` subcommands: the operator surface for the CP-08-108
+/// transfer. All three share the workspace resolution and refuse to run
+/// against a workspace with no legacy automation store — a missing store
+/// must be a visible fact, not a vacuously empty transfer.
+fn run_schedule(
+    workspace_arg: Option<std::path::PathBuf>,
+    action: ScheduleAction,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = resolve_workspace(workspace_arg.as_deref())?;
+    let work_db = workspace.work_db();
+    if let Some(parent) = work_db.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // The legacy store IsanAgent writes; the transfer reads it read-only.
+    let memory_db = workspace
+        .isanagent_state
+        .join(".system_generated")
+        .join("agent_memory.db");
+    if !memory_db.exists() {
+        return Err(format!(
+            "no legacy automation store at {}; there is nothing to transfer from this workspace",
+            memory_db.display()
+        )
+        .into());
+    }
+    let transfer = SqliteCronAutomationTransfer::open(&work_db)?;
+    match action {
+        ScheduleAction::Snapshot {
+            organization,
+            project,
+        } => {
+            // Opening both repositories ensures their schemas exist before
+            // the transfer transaction writes into them.
+            let work_items = SqliteWorkItemRepository::open(&work_db)?;
+            SqliteRoutineRepository::open(&work_db)?;
+            let attribution = TransferAttribution {
+                organization_id: OrganizationId::new(&organization),
+                project_id: ProjectId::new(&project),
+                actor: Actor::System {
+                    component: "altai-control-plane schedule snapshot".into(),
+                },
+            };
+            let report = transfer.snapshot(&memory_db, &attribution, &work_items)?;
+            println!(
+                "active automations: {} (newly mapped {}, already mapped {}, incompatible {})",
+                report.total_active, report.newly_mapped, report.already_mapped, report.incompatible
+            );
+            println!(
+                "next: `schedule status` to inspect, then `schedule enable --owner <daemon|desktop_host>`"
+            );
+        }
+        ScheduleAction::Enable { owner } => {
+            if owner != SCHEDULE_OWNER_DAEMON && owner != SCHEDULE_OWNER_DESKTOP {
+                return Err(format!(
+                    "unknown schedule owner {owner:?}: the ledger records `daemon` or `desktop_host`"
+                )
+                .into());
+            }
+            let ledger = SqliteFeatureFlagRepository::open(&work_db)?;
+            // Freeze order, enforced in sequence: every active automation
+            // must be mapped and compatible (typed-closed, naming each
+            // blocker) before any flag moves.
+            transfer.verify_enable_ready(&memory_db)?;
+            // Insert-only writes: the owner is named first, then the
+            // handover happens, so a crash between the two leaves the
+            // ledger undecided (legacy behavior stands).
+            record_flag(&ledger, SCHEDULE_OWNER_FLAG, &owner)?;
+            record_flag(&ledger, CONTROL_PLANE_ENABLED_FLAG, "true")?;
+            let automations = SqliteCronAutomationTransfer::read_active_automations(&memory_db)?;
+            for automation in &automations {
+                transfer.mark_retired(&automation.id)?;
+            }
+            println!(
+                "canonical scheduling enabled with owner {owner:?}; {} legacy row(s) retired",
+                automations.len()
+            );
+        }
+        ScheduleAction::Status => {
+            let ledger = SqliteFeatureFlagRepository::open(&work_db)?;
+            println!(
+                "control_plane_enabled: {:?}",
+                ledger.get(CONTROL_PLANE_ENABLED_FLAG)?
+            );
+            println!("schedule_owner: {:?}", ledger.get(SCHEDULE_OWNER_FLAG)?);
+            println!(
+                "legacy_cron_compatibility: {:?}",
+                ledger.get(LEGACY_CRON_COMPATIBILITY_FLAG)?
+            );
+            for row in transfer.status(&memory_db)? {
+                println!(
+                    "automation {} enabled={} disposition={} retired={}",
+                    row.automation_id,
+                    row.enabled,
+                    row.disposition.as_deref().unwrap_or("unmapped"),
+                    row.retired
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Insert-only flag write via `set_if_absent`: the first recorded decision
+/// wins, an equal value is accepted as idempotent, and a conflicting one
+/// fails typed instead of being silently overwritten.
+fn record_flag(
+    ledger: &dyn FeatureFlagRepository,
+    flag_key: &str,
+    flag_value: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if ledger.set_if_absent(flag_key, flag_value)? {
+        return Ok(());
+    }
+    let existing = ledger.get(flag_key)?.unwrap_or_default();
+    if existing == flag_value {
+        return Ok(());
+    }
+    Err(format!(
+        "feature flag {flag_key} is already {existing:?}; refusing to overwrite it with {flag_value:?}"
+    )
+    .into())
 }

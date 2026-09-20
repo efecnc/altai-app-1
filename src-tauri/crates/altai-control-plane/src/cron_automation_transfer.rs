@@ -17,15 +17,13 @@
 //! the mapping row plus the fire-time gate in the desktop host — the
 //! gate, not the bookkeeping, is the enforcement point.
 
-use crate::{
-    RoutineRepository, SqliteRoutineRepository, SqliteWorkItemRepository, WorkItemRepository,
-};
+use crate::{SqliteRoutineRepository, SqliteWorkItemRepository, WorkItemRepository};
 use altai_control_protocol::{
     Actor, OrganizationId, ProjectId, Routine, RoutineId, RoutineRevision, RoutineRevisionId,
     RoutineStatus, RoutineTrigger, Revision, WorkItem, WorkItemId, WorkItemKind, WorkStatus,
     ExecutionPhase,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -35,14 +33,13 @@ use std::{
 };
 
 /// The schedule vocabulary of the legacy `cron_jobs` rows, mirrored exactly
-/// from the pinned IsanAgent `ScheduleKind` (externally tagged JSON).
+/// from the pinned IsanAgent `ScheduleKind`: internally tagged with the
+/// default PascalCase variant names (`{"kind":"Cron","cron_expr":…}`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
 pub enum LegacySchedule {
-    #[serde(rename = "at")]
     At { at_ms: i64 },
-    #[serde(rename = "every")]
     Every { every_ms: i64 },
-    #[serde(rename = "cron")]
     Cron { cron_expr: String },
 }
 
@@ -112,6 +109,17 @@ pub struct SnapshotReport {
     pub newly_mapped: usize,
     pub already_mapped: usize,
     pub incompatible: usize,
+}
+
+/// One active automation's transfer state, for operator surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationTransferStatus {
+    pub automation_id: String,
+    pub enabled: bool,
+    /// The recorded disposition (`mapped`, `incompatible`), or `None` while
+    /// the automation is unmapped.
+    pub disposition: Option<String>,
+    pub retired: bool,
 }
 
 /// Whether the legacy row is canonical now, or structurally unrepresentable.
@@ -224,7 +232,6 @@ impl SqliteCronAutomationTransfer {
         memory_db: &Path,
         attribution: &TransferAttribution,
         work_items: &SqliteWorkItemRepository,
-        routines: &SqliteRoutineRepository,
     ) -> Result<SnapshotReport, TransferError> {
         // Fail closed before any canonical write: the attribution's project
         // must exist and belong to the claimed organization.
@@ -267,17 +274,38 @@ impl SqliteCronAutomationTransfer {
                 match existing_disposition.as_str() {
                     "mapped" => report.already_mapped += 1,
                     "incompatible" => report.incompatible += 1,
-                    _ => {}
+                    // A corrupted disposition must not silently count as a
+                    // decided automation: fail typed so an operator
+                    // reconciles the row instead of enabling over it.
+                    other => {
+                        return Err(TransferError::Database {
+                            reason: format!(
+                                "automation {} has an unrecognized mapping disposition {other:?}; reconcile the row before snapshotting",
+                                automation.id
+                            ),
+                        })
+                    }
                 }
                 continue;
             }
-            match Self::map_automation(automation, attribution, work_items, routines)? {
-                Disposition::Mapped {
-                    routine_id,
-                    work_item_id,
-                } => {
-                    self.lock()?
-                        .execute(
+            // One immediate transaction per automation on this connection:
+            // the work item, routine, routine revision, and mapping row
+            // commit together or not at all, so a crash mid-snapshot never
+            // strands half-written canonical state (which would make every
+            // re-run fail with AlreadyExists/Conflict). Per-automation
+            // granularity keeps each busy window short.
+            let outcome = {
+                let mut connection = self.lock()?;
+                let tx = connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(Self::db)?;
+                let disposition = Self::map_automation(automation, attribution, &tx)?;
+                match &disposition {
+                    Disposition::Mapped {
+                        routine_id,
+                        work_item_id,
+                    } => {
+                        tx.execute(
                             "INSERT INTO control_plane_cron_automation_mappings (automation_id, disposition, routine_id, work_item_id, content_hash, provenance_json) VALUES (?1, 'mapped', ?2, ?3, ?4, ?5)",
                             params![
                                 automation.id,
@@ -288,17 +316,21 @@ impl SqliteCronAutomationTransfer {
                             ],
                         )
                         .map_err(Self::db)?;
-                    report.newly_mapped += 1;
-                }
-                Disposition::Incompatible { reason } => {
-                    self.lock()?
-                        .execute(
+                    }
+                    Disposition::Incompatible { reason } => {
+                        tx.execute(
                             "INSERT INTO control_plane_cron_automation_mappings (automation_id, disposition, routine_id, work_item_id, content_hash, provenance_json) VALUES (?1, 'incompatible', NULL, NULL, ?2, ?3)",
-                            params![automation.id, content_hash, Self::provenance_json_with_reason(automation, &reason),],
+                            params![automation.id, content_hash, Self::provenance_json_with_reason(automation, reason),],
                         )
                         .map_err(Self::db)?;
-                    report.incompatible += 1;
+                    }
                 }
+                tx.commit().map_err(Self::db)?;
+                disposition
+            };
+            match outcome {
+                Disposition::Mapped { .. } => report.newly_mapped += 1,
+                Disposition::Incompatible { .. } => report.incompatible += 1,
             }
         }
         Ok(report)
@@ -325,11 +357,17 @@ impl SqliteCronAutomationTransfer {
                     automation.id.clone(),
                     "not snapshotted yet".to_string(),
                 )),
+                Some("mapped") => {}
                 Some("incompatible") => blockers.push((
                     automation.id.clone(),
                     "schedule has no canonical trigger vocabulary (At/Every); remove the automation or extend the vocabulary".to_string(),
                 )),
-                _ => {}
+                // A corrupted disposition string is not enable-ready: it
+                // blocks, naming the row, until an operator reconciles it.
+                Some(other) => blockers.push((
+                    automation.id.clone(),
+                    format!("mapping row has an unrecognized disposition {other:?}; re-run snapshot"),
+                )),
             }
         }
         if blockers.is_empty() {
@@ -351,15 +389,45 @@ impl SqliteCronAutomationTransfer {
         Ok(())
     }
 
-    /// Deterministic canonical mapping for one automation. Cron schedules
-    /// become a canonical Work item (the message is the intent) plus an
-    /// Active `Recurring` routine targeting it; At/Every schedules are
-    /// recorded incompatible with a reason.
+    /// Read-only transfer state of every active automation, for operator
+    /// surfaces (the daemon's `schedule status` command).
+    pub fn status(
+        &self,
+        memory_db: &Path,
+    ) -> Result<Vec<AutomationTransferStatus>, TransferError> {
+        let automations = Self::read_active_automations(memory_db)?;
+        let connection = self.lock()?;
+        let mut rows = Vec::new();
+        for automation in automations {
+            let row: Option<(String, Option<i64>)> = connection
+                .query_row(
+                    "SELECT disposition, retired_at_unix_seconds FROM control_plane_cron_automation_mappings WHERE automation_id = ?1",
+                    [&automation.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(Self::db)?;
+            rows.push(AutomationTransferStatus {
+                automation_id: automation.id,
+                enabled: automation.enabled,
+                disposition: row.as_ref().map(|(disposition, _)| disposition.clone()),
+                retired: matches!(row, Some((_, Some(_)))),
+            });
+        }
+        Ok(rows)
+    }
+
+    /// Deterministic canonical mapping for one automation, written on the
+    /// caller's transaction (`&Transaction` derefs to `&Connection`). Cron
+    /// schedules become a canonical Work item (the message is the intent)
+    /// plus a `Recurring` routine targeting it — `Active` when the legacy
+    /// row was enabled, `Paused` when it was not, so a paused automation
+    /// never resurrects as a firing schedule after the cutover. At/Every
+    /// schedules are recorded incompatible with a reason.
     fn map_automation(
         automation: &CronAutomationRecord,
         attribution: &TransferAttribution,
-        work_items: &SqliteWorkItemRepository,
-        routines: &SqliteRoutineRepository,
+        tx: &Connection,
     ) -> Result<Disposition, TransferError> {
         let cron_expr = match &automation.schedule {
             LegacySchedule::Cron { cron_expr } => cron_expr.clone(),
@@ -398,11 +466,11 @@ impl SqliteCronAutomationTransfer {
             created_at: rfc3339_now(),
             updated_at: rfc3339_now(),
         };
-        work_items
-            .create(work_item)
-            .map_err(|error| TransferError::Database {
+        SqliteWorkItemRepository::create_in(tx, work_item).map_err(|error| {
+            TransferError::Database {
                 reason: format!("work item snapshot failed: {error}"),
-            })?;
+            }
+        })?;
 
         let routine_id = RoutineId::new(format!("snap_{}", automation.id));
         let revision_id =
@@ -411,16 +479,22 @@ impl SqliteCronAutomationTransfer {
             id: routine_id.clone(),
             organization_id: attribution.organization_id.clone(),
             current_revision_id: None,
-            status: RoutineStatus::Active,
+            // Only an Active routine is materialized by a scheduler, so the
+            // legacy enabled bit transfers as the routine lifecycle state.
+            status: if automation.enabled {
+                RoutineStatus::Active
+            } else {
+                RoutineStatus::Paused
+            },
             revision: Revision::INITIAL,
             created_at_unix_seconds: now_unix,
             updated_at_unix_seconds: now_unix,
         };
-        routines
-            .create(routine)
-            .map_err(|error| TransferError::Database {
+        SqliteRoutineRepository::create_in(tx, routine).map_err(|error| {
+            TransferError::Database {
                 reason: format!("routine snapshot failed: {error}"),
-            })?;
+            }
+        })?;
         let revision = RoutineRevision {
             id: revision_id,
             routine_id: routine_id.clone(),
@@ -431,11 +505,11 @@ impl SqliteCronAutomationTransfer {
             target_work_item_id: work_item_id.clone(),
             created_at_unix_seconds: now_unix,
         };
-        routines
-            .append_revision(&routine_id, revision)
-            .map_err(|error| TransferError::Database {
+        SqliteRoutineRepository::append_revision_in(tx, &routine_id, revision).map_err(|error| {
+            TransferError::Database {
                 reason: format!("routine revision snapshot failed: {error}"),
-            })?;
+            }
+        })?;
         Ok(Disposition::Mapped {
             routine_id,
             work_item_id,
@@ -503,7 +577,13 @@ fn truncate_bytes(value: &str, max_bytes: usize) -> String {
 }
 
 fn hex(digest: &[u8]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    use std::fmt::Write as _;
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        // Writing into the pre-sized buffer cannot fail.
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
 }
 
 fn now_unix_seconds() -> u64 {
@@ -520,7 +600,7 @@ fn rfc3339_now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ScopeRepository;
+    use crate::{RoutineRepository, ScopeRepository, SqliteRoutineRepository};
     use altai_control_protocol::{Organization, Project, ProjectStatus};
     use std::sync::Arc;
 
@@ -607,6 +687,55 @@ mod tests {
             .unwrap();
     }
 
+    fn insert_job_with_enabled(
+        connection: &Connection,
+        id: &str,
+        schedule_json: &str,
+        message: &str,
+        enabled: i64,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO cron_jobs (id, schedule, message, chat_id, channel, enabled) VALUES (?1, ?2, ?3, 'chat-1', 'tauri', ?4)",
+                params![id, schedule_json, message, enabled],
+            )
+            .unwrap();
+    }
+
+    /// The pinned IsanAgent serializer writes `ScheduleKind` as internally
+    /// tagged PascalCase (`#[serde(tag = "kind")]`); `LegacySchedule` must
+    /// round-trip those exact bytes, or snapshot fails on every real
+    /// workspace.
+    #[test]
+    fn legacy_schedule_round_trips_the_pinned_isanagent_shape() {
+        let pinned = [
+            (
+                r#"{"kind":"At","at_ms":1234}"#,
+                LegacySchedule::At { at_ms: 1234 },
+            ),
+            (
+                r#"{"kind":"Every","every_ms":90000}"#,
+                LegacySchedule::Every { every_ms: 90000 },
+            ),
+            (
+                r#"{"kind":"Cron","cron_expr":"0 9 * * MON"}"#,
+                LegacySchedule::Cron {
+                    cron_expr: "0 9 * * MON".to_string(),
+                },
+            ),
+        ];
+        for (json, schedule) in pinned {
+            let parsed: LegacySchedule = serde_json::from_str(json)
+                .unwrap_or_else(|error| panic!("pinned shape {json} must parse: {error}"));
+            assert_eq!(parsed, schedule);
+            assert_eq!(
+                serde_json::to_string(&schedule).unwrap(),
+                json,
+                "serialization must reproduce the pinned byte shape"
+            );
+        }
+    }
+
     #[test]
     fn cron_automations_map_to_canonical_work_and_routine() {
         let h = harness();
@@ -615,13 +744,13 @@ mod tests {
             insert_job(
                 &connection,
                 "job-1",
-                r#"{"cron":{"cron_expr":"0 9 * * MON"}}"#,
+                r#"{"kind":"Cron","cron_expr":"0 9 * * MON"}"#,
                 "Weekly report",
             );
         }
         let report = h
             .transfer
-            .snapshot(&h.memory_db, &h.attribution, &h.work_items, &h.routines)
+            .snapshot(&h.memory_db, &h.attribution, &h.work_items)
             .unwrap();
         assert_eq!(
             report,
@@ -667,19 +796,19 @@ mod tests {
             insert_job(
                 &connection,
                 "job-cron",
-                r#"{"cron":{"cron_expr":"*/5 * * * *"}}"#,
+                r#"{"kind":"Cron","cron_expr":"*/5 * * * *"}"#,
                 "Cron job",
             );
             insert_job(
                 &connection,
                 "job-every",
-                r#"{"every":{"every_ms":90000}}"#,
+                r#"{"kind":"Every","every_ms":90000}"#,
                 "Interval job",
             );
         }
         let first = h
             .transfer
-            .snapshot(&h.memory_db, &h.attribution, &h.work_items, &h.routines)
+            .snapshot(&h.memory_db, &h.attribution, &h.work_items)
             .unwrap();
         assert_eq!(
             (first.newly_mapped, first.incompatible, first.already_mapped),
@@ -688,7 +817,7 @@ mod tests {
         // Re-run: everything is already recorded, nothing new is written.
         let second = h
             .transfer
-            .snapshot(&h.memory_db, &h.attribution, &h.work_items, &h.routines)
+            .snapshot(&h.memory_db, &h.attribution, &h.work_items)
             .unwrap();
         assert_eq!(
             (second.newly_mapped, second.incompatible, second.already_mapped),
@@ -716,7 +845,7 @@ mod tests {
             insert_job(
                 &connection,
                 "job-2",
-                r#"{"cron":{"cron_expr":"0 0 * * *"}}"#,
+                r#"{"kind":"Cron","cron_expr":"0 0 * * *"}"#,
                 "Daily job",
             );
         }
@@ -727,7 +856,7 @@ mod tests {
         assert!(matches!(blocked, TransferError::EnableBlocked { ref blockers } if blockers.len() == 1));
 
         h.transfer
-            .snapshot(&h.memory_db, &h.attribution, &h.work_items, &h.routines)
+            .snapshot(&h.memory_db, &h.attribution, &h.work_items)
             .unwrap();
         h.transfer.verify_enable_ready(&h.memory_db).unwrap();
 
@@ -744,7 +873,7 @@ mod tests {
         }
         let changed = h
             .transfer
-            .snapshot(&h.memory_db, &h.attribution, &h.work_items, &h.routines)
+            .snapshot(&h.memory_db, &h.attribution, &h.work_items)
             .expect_err("changed automation must be a typed error");
         assert_eq!(
             changed,
@@ -762,7 +891,7 @@ mod tests {
             insert_job(
                 &connection,
                 "job-gone",
-                r#"{"cron":{"cron_expr":"0 0 * * *"}}"#,
+                r#"{"kind":"Cron","cron_expr":"0 0 * * *"}"#,
                 "Already completed",
             );
             connection
@@ -774,7 +903,7 @@ mod tests {
         }
         let report = h
             .transfer
-            .snapshot(&h.memory_db, &h.attribution, &h.work_items, &h.routines)
+            .snapshot(&h.memory_db, &h.attribution, &h.work_items)
             .unwrap();
         assert_eq!(report.total_active, 0);
         assert_eq!(report.newly_mapped, 0);
@@ -787,12 +916,12 @@ mod tests {
             insert_job(
                 &connection,
                 "job-live",
-                r#"{"cron":{"cron_expr":"0 0 * * *"}}"#,
+                r#"{"kind":"Cron","cron_expr":"0 0 * * *"}"#,
                 "Live",
             );
         }
         h.transfer
-            .snapshot(&h.memory_db, &h.attribution, &h.work_items, &h.routines)
+            .snapshot(&h.memory_db, &h.attribution, &h.work_items)
             .unwrap();
         h.transfer.mark_retired("job-live").unwrap();
         h.transfer.mark_retired("job-live").unwrap(); // idempotent
@@ -817,7 +946,7 @@ mod tests {
             insert_job(
                 &connection,
                 "job-3",
-                r#"{"cron":{"cron_expr":"0 0 * * *"}}"#,
+                r#"{"kind":"Cron","cron_expr":"0 0 * * *"}"#,
                 "Daily job",
             );
         }
@@ -828,7 +957,7 @@ mod tests {
         };
         let error = h
             .transfer
-            .snapshot(&h.memory_db, &foreign, &h.work_items, &h.routines)
+            .snapshot(&h.memory_db, &foreign, &h.work_items)
             .expect_err("foreign organization must be refused");
         assert!(matches!(error, TransferError::ProjectResolution { .. }));
         // Nothing was written to the mapping table.
@@ -843,5 +972,135 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    /// F5 regression: a paused (enabled = 0) legacy automation transfers to
+    /// a `Paused` routine, so it cannot resurrect as a firing schedule
+    /// after the cutover — only an `Active` routine is materialized.
+    #[test]
+    fn paused_automations_transfer_to_paused_routines() {
+        let h = harness();
+        {
+            let connection = Connection::open(&h.memory_db).unwrap();
+            insert_job_with_enabled(
+                &connection,
+                "job-paused",
+                r#"{"kind":"Cron","cron_expr":"0 12 * * *"}"#,
+                "Paused daily job",
+                0,
+            );
+        }
+        let report = h
+            .transfer
+            .snapshot(&h.memory_db, &h.attribution, &h.work_items)
+            .unwrap();
+        assert_eq!(report.newly_mapped, 1);
+        let routine = h
+            .routines
+            .get(&RoutineId::new("snap_job-paused"))
+            .unwrap()
+            .expect("routine must exist");
+        assert_eq!(
+            routine.status,
+            RoutineStatus::Paused,
+            "a paused automation must not transfer as an Active routine"
+        );
+        // A faithfully transferred paused automation does not block enable.
+        h.transfer.verify_enable_ready(&h.memory_db).unwrap();
+    }
+
+    /// F3 regression: one automation's canonical writes are one
+    /// transaction. A failure after the work item insert rolls the whole
+    /// automation back instead of stranding half-written state — which
+    /// would otherwise make every re-run fail with AlreadyExists or a
+    /// byte-compare Conflict forever.
+    #[test]
+    fn a_failed_automation_write_rolls_back_atomically() {
+        let h = harness();
+        {
+            let connection = Connection::open(&h.memory_db).unwrap();
+            insert_job(
+                &connection,
+                "job-tx",
+                r#"{"kind":"Cron","cron_expr":"0 6 * * *"}"#,
+                "Transactional job",
+            );
+        }
+        // Break the routine write so the per-automation transaction fails
+        // after the work item insert has already succeeded.
+        Connection::open(&h._dir.path().join("work.db"))
+            .unwrap()
+            .execute("DROP TABLE control_plane_routines", [])
+            .unwrap();
+        let error = h
+            .transfer
+            .snapshot(&h.memory_db, &h.attribution, &h.work_items)
+            .expect_err("a broken routine write must fail the snapshot");
+        assert!(matches!(error, TransferError::Database { .. }));
+        // The work item insert rolled back with it.
+        let work_items: i64 = Connection::open(&h._dir.path().join("work.db"))
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM control_plane_work_items",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(work_items, 0, "the work item write must roll back");
+        let mappings: i64 = h
+            .transfer
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM control_plane_cron_automation_mappings",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mappings, 0, "no mapping row may survive a failed write");
+    }
+
+    /// F11 regression: a corrupted disposition string is not a decided
+    /// automation — snapshot refuses typed, and the row blocks enable.
+    #[test]
+    fn a_corrupted_disposition_fails_typed_and_blocks_enable() {
+        let h = harness();
+        {
+            let connection = Connection::open(&h.memory_db).unwrap();
+            insert_job(
+                &connection,
+                "job-corrupt",
+                r#"{"kind":"Cron","cron_expr":"0 3 * * *"}"#,
+                "Corrupted mapping",
+            );
+        }
+        h.transfer
+            .snapshot(&h.memory_db, &h.attribution, &h.work_items)
+            .unwrap();
+        {
+            let connection = h.transfer.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE control_plane_cron_automation_mappings SET disposition = 'garbled' WHERE automation_id = 'job-corrupt'",
+                    [],
+                )
+                .unwrap();
+        }
+        let snapshotted = h
+            .transfer
+            .snapshot(&h.memory_db, &h.attribution, &h.work_items)
+            .expect_err("a corrupted disposition must fail the snapshot typed");
+        assert!(matches!(snapshotted, TransferError::Database { .. }));
+        let blocked = h
+            .transfer
+            .verify_enable_ready(&h.memory_db)
+            .expect_err("a corrupted disposition must block enable");
+        match blocked {
+            TransferError::EnableBlocked { blockers } => {
+                assert_eq!(blockers.len(), 1);
+                assert_eq!(blockers[0].0, "job-corrupt");
+            }
+            other => panic!("expected EnableBlocked, got {other:?}"),
+        }
     }
 }

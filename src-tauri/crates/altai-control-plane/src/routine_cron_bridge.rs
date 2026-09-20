@@ -64,15 +64,23 @@ impl RoutineCronBridge {
         }
     }
 
-    /// Authority-gated loop for the scheduling cutover (CP-08-108): each
-    /// tick re-reads the feature-flag ledger and materializes only while it
-    /// names this daemon as the schedule's owner with the rollback switch
-    /// un-pulled. While owning, the daemon additionally holds the
-    /// workspace's single-writer lock — the same kernel-mediated lock the
-    /// desktop holds for its app run — so a live desktop's workspace is
-    /// never double-driven; when ownership moves away, the lock is
-    /// released so the desktop can resume. A `WorkspaceHeld` refusal is
-    /// logged and the tick stays idle.
+    /// Authority-gated loop for the scheduling cutover (CP-08-108). Each
+    /// tick re-reads the feature-flag ledger and takes exactly one of
+    /// three paths:
+    ///
+    /// * Cutover undecided or rolled back (`canonical_decided` false):
+    ///   the legacy tick runs unconditionally and the workspace
+    ///   single-writer lock is never taken — byte-for-byte the
+    ///   pre-cutover daemon, which drove every due routine without
+    ///   consulting any flag or holding any lock.
+    /// * Decided and owned by this daemon: while owning, the daemon
+    ///   holds the workspace's single-writer lock — the same
+    ///   kernel-mediated lock the desktop holds for its app run — so a
+    ///   live desktop's workspace is never double-driven; a
+    ///   `WorkspaceHeld` refusal is logged and the tick stays idle.
+    /// * Decided and owned elsewhere (or the ledger is unreadable): the
+    ///   tick stays idle and the lock is released so the owner can take
+    ///   it.
     pub async fn run_gated(
         self,
         ledger: std::sync::Arc<dyn FeatureFlagRepository>,
@@ -85,35 +93,66 @@ impl RoutineCronBridge {
         loop {
             ticker.tick().await;
             let now = wall_clock_now();
-            let authority = match resolve_schedule_authority(ledger.as_ref()) {
-                Ok(authority) => authority,
-                Err(error) => {
-                    eprintln!("schedule authority lookup failed: {error}");
-                    continue;
-                }
-            };
-            if authority.authorizes(SCHEDULE_OWNER_DAEMON) {
-                if owned_workspace.is_none() {
-                    match altai_core::WorkStore::open(&work_db) {
-                        Ok(store) => owned_workspace = Some(std::sync::Arc::new(store)),
-                        Err(error) => {
-                            // The desktop (or another binary) owns this
-                            // workspace's writer lock: fail closed, stay idle.
-                            eprintln!(
-                                "schedule authority names this daemon but the workspace is held: {error}"
-                            );
-                            continue;
-                        }
-                    }
-                }
-                if let Err(error) = self.tick(now) {
-                    eprintln!("routine cron bridge tick at {now} failed: {error}");
-                }
-            } else {
-                // Authority moved away (flag off, owner renamed, rollback
-                // pulled): release the lock so the desktop can resume.
-                owned_workspace = None;
+            self.gated_tick(now, ledger.as_ref(), &work_db, &mut owned_workspace);
+        }
+    }
+
+    /// One authority-gated tick: resolve the ledger, then either run the
+    /// unconditional legacy tick (never touching the workspace lock), hold
+    /// the lock and drive canonically as the named daemon owner, or stay
+    /// idle and release. Exposed for deterministic tests; [`Self::run_gated`]
+    /// supplies the wall-clock `now` and carries `owned_workspace` across
+    /// ticks.
+    fn gated_tick(
+        &self,
+        now_unix_seconds: u64,
+        ledger: &dyn FeatureFlagRepository,
+        work_db: &std::path::Path,
+        owned_workspace: &mut Option<std::sync::Arc<altai_core::WorkStore>>,
+    ) {
+        let authority = match resolve_schedule_authority(ledger) {
+            Ok(authority) => authority,
+            Err(error) => {
+                // The ledger is unreadable, so ownership cannot be
+                // re-confirmed this tick: release the lock so whichever
+                // process the last good tick named — or none — can take it.
+                eprintln!("schedule authority lookup failed: {error}");
+                *owned_workspace = None;
+                return;
             }
+        };
+        if !authority.canonical_decided() {
+            // Undecided or rolled back: legacy behavior stands. The legacy
+            // daemon never took the workspace lock, so this path must not
+            // either — opening a WorkStore here would lock live legacy
+            // workspaces out of their own writer.
+            *owned_workspace = None;
+            if let Err(error) = self.tick(now_unix_seconds) {
+                eprintln!("routine cron bridge tick at {now_unix_seconds} failed: {error}");
+            }
+            return;
+        }
+        if authority.owner.as_deref() != Some(SCHEDULE_OWNER_DAEMON) {
+            // Authority moved to another owner (the desktop): release the
+            // lock so the owner can take it.
+            *owned_workspace = None;
+            return;
+        }
+        if owned_workspace.is_none() {
+            match altai_core::WorkStore::open(work_db) {
+                Ok(store) => *owned_workspace = Some(std::sync::Arc::new(store)),
+                Err(error) => {
+                    // The desktop (or another binary) owns this
+                    // workspace's writer lock: fail closed, stay idle.
+                    eprintln!(
+                        "schedule authority names this daemon but the workspace is held: {error}"
+                    );
+                    return;
+                }
+            }
+        }
+        if let Err(error) = self.tick(now_unix_seconds) {
+            eprintln!("routine cron bridge tick at {now_unix_seconds} failed: {error}");
         }
     }
 }
@@ -128,7 +167,11 @@ fn wall_clock_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InMemoryWakeRepository, RoutineRepository, SqliteRoutineRepository, WakeRepository};
+    use crate::{
+        FeatureFlagRepository, InMemoryWakeRepository, RoutineRepository, SqliteFeatureFlagRepository,
+        SqliteRoutineRepository, WakeRepository, CONTROL_PLANE_ENABLED_FLAG,
+        LEGACY_CRON_COMPATIBILITY_FLAG, SCHEDULE_OWNER_DESKTOP, SCHEDULE_OWNER_FLAG,
+    };
     use altai_control_protocol::{
         OrganizationId, Revision, Routine, RoutineId, RoutineRevisionId, RoutineStatus,
         RoutineTrigger, WakeSource, WorkItemId,
@@ -260,5 +303,181 @@ mod tests {
             }
         };
         assert!(wake.sources.iter().any(|s| matches!(s, WakeSource::Routine)));
+    }
+
+    /// A gated bridge over fresh sqlite routine state, an in-memory wake
+    /// queue, and a sqlite feature-flag ledger beside the routine state.
+    #[allow(clippy::type_complexity)]
+    fn gated_bridge(
+        dir: &tempfile::TempDir,
+    ) -> (
+        RoutineCronBridge,
+        Arc<SqliteRoutineRepository>,
+        Arc<InMemoryWakeRepository>,
+        Arc<SqliteFeatureFlagRepository>,
+        std::path::PathBuf,
+    ) {
+        let work_db = dir.path().join("work.db");
+        let routines = Arc::new(SqliteRoutineRepository::open(&work_db).unwrap());
+        let wakes = Arc::new(InMemoryWakeRepository::default());
+        let ledger = Arc::new(SqliteFeatureFlagRepository::open(&work_db).unwrap());
+        let materializer = Arc::new(RoutineMaterializer::new(routines.clone(), wakes.clone()));
+        (
+            RoutineCronBridge::new(materializer, DEFAULT_CRON_TICK),
+            routines,
+            wakes,
+            ledger,
+            work_db,
+        )
+    }
+
+    /// A due recurring routine for the deterministic tick at `now` = 60.
+    fn seed_due_routine(routines: &SqliteRoutineRepository) {
+        recurring_routine(routines, "rt", "* * * * *", 0);
+    }
+
+    fn canonical_daemon_flags(ledger: &SqliteFeatureFlagRepository) {
+        ledger.set(CONTROL_PLANE_ENABLED_FLAG, "true").unwrap();
+        ledger.set(SCHEDULE_OWNER_FLAG, SCHEDULE_OWNER_DAEMON).unwrap();
+        ledger
+            .set(LEGACY_CRON_COMPATIBILITY_FLAG, "false")
+            .unwrap();
+    }
+
+    /// F1 regression: with the scheduling ledger entirely absent — the
+    /// state of every deployment that predates the cutover — the gated
+    /// bridge still runs the legacy tick and materializes the due wake,
+    /// and it never takes the workspace writer lock the legacy daemon
+    /// never held.
+    #[test]
+    fn undecided_ledger_materializes_the_legacy_tick_without_the_workspace_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cron_bridge, routines, wakes, ledger, work_db) = gated_bridge(&dir);
+        seed_due_routine(&routines);
+
+        let mut owned = None;
+        cron_bridge.gated_tick(60, ledger.as_ref(), &work_db, &mut owned);
+
+        assert!(
+            wakes
+                .claim_wake(&WorkItemId::new("work-1"), "now".to_string())
+                .is_ok(),
+            "an undecided ledger must leave legacy scheduling running"
+        );
+        assert!(
+            owned.is_none(),
+            "the undecided path must not open the workspace writer lock"
+        );
+        // The lock is free for the desktop: an open succeeds.
+        let _store = altai_core::WorkStore::open(&work_db).unwrap();
+    }
+
+    /// F1 regression: the pulled legacy rollback switch also leaves the
+    /// legacy tick running, unconditionally and lock-free.
+    #[test]
+    fn legacy_rollback_materializes_the_legacy_tick_without_the_workspace_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cron_bridge, routines, wakes, ledger, work_db) = gated_bridge(&dir);
+        seed_due_routine(&routines);
+        canonical_daemon_flags(&ledger);
+        ledger
+            .set(LEGACY_CRON_COMPATIBILITY_FLAG, "true")
+            .unwrap();
+
+        let mut owned = None;
+        cron_bridge.gated_tick(60, ledger.as_ref(), &work_db, &mut owned);
+
+        assert!(
+            wakes
+                .claim_wake(&WorkItemId::new("work-1"), "now".to_string())
+                .is_ok(),
+            "a pulled rollback switch must leave legacy scheduling running"
+        );
+        assert!(owned.is_none());
+        let _store = altai_core::WorkStore::open(&work_db).unwrap();
+    }
+
+    /// Desktop ownership idles the daemon bridge — a due routine stays
+    /// unmaterialized — and any lock the daemon held while it owned the
+    /// schedule is released for the desktop to take.
+    #[test]
+    fn desktop_ownership_idles_the_bridge_and_releases_the_workspace_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cron_bridge, routines, wakes, ledger, work_db) = gated_bridge(&dir);
+        seed_due_routine(&routines);
+
+        // Canonical, but the desktop owns the schedule: idle, lock-free.
+        ledger.set(CONTROL_PLANE_ENABLED_FLAG, "true").unwrap();
+        ledger
+            .set(SCHEDULE_OWNER_FLAG, SCHEDULE_OWNER_DESKTOP)
+            .unwrap();
+        ledger
+            .set(LEGACY_CRON_COMPATIBILITY_FLAG, "false")
+            .unwrap();
+        let mut owned = None;
+        cron_bridge.gated_tick(60, ledger.as_ref(), &work_db, &mut owned);
+        assert!(
+            wakes
+                .claim_wake(&WorkItemId::new("work-1"), "now".to_string())
+                .is_err(),
+            "the desktop-owned schedule must keep the daemon bridge idle"
+        );
+        assert!(owned.is_none());
+
+        // Ownership moves to the daemon: the tick drives and holds the lock.
+        canonical_daemon_flags(&ledger);
+        cron_bridge.gated_tick(60, ledger.as_ref(), &work_db, &mut owned);
+        assert!(
+            owned.is_some(),
+            "the daemon-owned tick must hold the workspace writer lock"
+        );
+        assert!(matches!(
+            altai_core::WorkStore::open(&work_db),
+            Err(altai_core::WorkStoreError::WorkspaceHeld { .. })
+        ));
+
+        // Ownership moves back: the tick idles and releases the lock.
+        ledger.set(SCHEDULE_OWNER_FLAG, SCHEDULE_OWNER_DESKTOP).unwrap();
+        cron_bridge.gated_tick(60, ledger.as_ref(), &work_db, &mut owned);
+        assert!(
+            owned.is_none(),
+            "the desktop-owner path must release the workspace lock"
+        );
+        let _store = altai_core::WorkStore::open(&work_db).unwrap();
+    }
+
+    /// A held workspace keeps the canonical daemon bridge idle, and the
+    /// refusal leaves no sticky failure state: once the holder releases
+    /// the lock, the next tick opens the workspace and materializes.
+    #[test]
+    fn a_held_workspace_keeps_the_bridge_idle_until_the_lock_is_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cron_bridge, routines, wakes, ledger, work_db) = gated_bridge(&dir);
+        seed_due_routine(&routines);
+        canonical_daemon_flags(&ledger);
+
+        let holder = altai_core::workspace_lock::WorkspaceFileLock::acquire(&work_db).unwrap();
+        let mut owned = None;
+        cron_bridge.gated_tick(60, ledger.as_ref(), &work_db, &mut owned);
+        assert!(
+            wakes
+                .claim_wake(&WorkItemId::new("work-1"), "now".to_string())
+                .is_err(),
+            "a held workspace must keep the daemon bridge idle"
+        );
+        assert!(
+            owned.is_none(),
+            "a refused open must not leave a half-held lock behind"
+        );
+        drop(holder);
+
+        cron_bridge.gated_tick(60, ledger.as_ref(), &work_db, &mut owned);
+        assert!(
+            wakes
+                .claim_wake(&WorkItemId::new("work-1"), "now".to_string())
+                .is_ok(),
+            "after the holder releases, the bridge must materialize the due wake"
+        );
+        assert!(owned.is_some());
     }
 }

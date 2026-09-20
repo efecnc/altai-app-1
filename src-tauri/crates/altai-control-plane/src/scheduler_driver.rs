@@ -53,12 +53,22 @@ pub struct ScheduleAuthority {
 }
 
 impl ScheduleAuthority {
-    /// True when the ledger gives `process` the scheduling authority:
+    /// True once the ledger has decided the cutover question at all:
     /// canonical scheduling is enabled, the legacy rollback switch is not
-    /// pulled, and this process is the named owner. Never true by
-    /// accident — every absent flag resolves to legacy.
+    /// pulled, and an owner is named. False means undecided or rolled
+    /// back — the pre-cutover legacy behavior stands, and a legacy
+    /// driver runs unconditionally exactly as it did before this ledger
+    /// existed.
+    pub fn canonical_decided(&self) -> bool {
+        self.enabled && !self.legacy_compatibility && self.owner.is_some()
+    }
+
+    /// True when the ledger gives `process` the scheduling authority: the
+    /// cutover is decided ([`Self::canonical_decided`]) and this process
+    /// is the named owner. Never true by accident — every absent flag
+    /// resolves to legacy.
     pub fn authorizes(&self, process: &str) -> bool {
-        self.enabled && !self.legacy_compatibility && self.owner.as_deref() == Some(process)
+        self.canonical_decided() && self.owner.as_deref() == Some(process)
     }
 }
 

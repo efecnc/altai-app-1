@@ -117,13 +117,19 @@ impl WorkspaceRootIdentity {
 }
 
 /// One canonical schedule driver per workspace `work.db` per app run
-/// (CP-08-108, package 101 slice C.a). The thread exists for every
-/// migrated workspace, but each tick re-reads the feature-flag ledger and
-/// materializes due routines only while the ledger names the desktop as
-/// the schedule's owner — an absent or foreign flag keeps it idle. The
-/// desktop's app-run workspace lock (the cached WorkStore) already covers
-/// the single-writer pairing, so no extra lock is taken here.
-fn ensure_desktop_schedule_driver(work_db: &Path) {
+/// (CP-08-108, package 101 slice C.a). The thread exists only for a
+/// workspace whose WorkStore this app run successfully opened and cached —
+/// the store holds the workspace's single-writer lock, so spawning from
+/// that success path (and from no other) keeps the driver from ticking
+/// against a workspace whose lock lives elsewhere. Each tick re-reads the
+/// feature-flag ledger and materializes due routines only while the ledger
+/// names the desktop as the schedule's owner — an absent or foreign flag
+/// keeps it idle — and requires the in-process WorkStore handle to still be
+/// alive: once the registry releases it, the thread stops.
+fn ensure_desktop_schedule_driver(
+    work_db: &Path,
+    store: &std::sync::Arc<altai_core::WorkStore>,
+) {
     static DRIVERS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
     let drivers = DRIVERS.get_or_init(|| Mutex::new(HashSet::new()));
     let mut guard = drivers.lock().expect("schedule driver registry poisoned");
@@ -131,20 +137,42 @@ fn ensure_desktop_schedule_driver(work_db: &Path) {
         return;
     }
     drop(guard);
-    let Ok(routines) = altai_control_plane::SqliteRoutineRepository::open(work_db) else {
-        return;
+    let routines = match altai_control_plane::SqliteRoutineRepository::open(work_db) {
+        Ok(repository) => repository,
+        Err(error) => {
+            log::error!(
+                "Desktop schedule driver disabled for {}: routine repository unavailable: {error}",
+                work_db.display()
+            );
+            return;
+        }
     };
-    let Ok(wakes) = altai_control_plane::SqliteWakeRepository::open(work_db) else {
-        return;
+    let wakes = match altai_control_plane::SqliteWakeRepository::open(work_db) {
+        Ok(repository) => repository,
+        Err(error) => {
+            log::error!(
+                "Desktop schedule driver disabled for {}: wake repository unavailable: {error}",
+                work_db.display()
+            );
+            return;
+        }
     };
-    let Ok(ledger) = altai_control_plane::SqliteFeatureFlagRepository::open(work_db) else {
-        return;
+    let ledger = match altai_control_plane::SqliteFeatureFlagRepository::open(work_db) {
+        Ok(repository) => repository,
+        Err(error) => {
+            log::error!(
+                "Desktop schedule driver disabled for {}: flag ledger unavailable: {error}",
+                work_db.display()
+            );
+            return;
+        }
     };
     let materializer = std::sync::Arc::new(altai_control_plane::RoutineMaterializer::new(
         std::sync::Arc::new(routines),
         std::sync::Arc::new(wakes),
     ));
     let ledger = std::sync::Arc::new(ledger);
+    let work_store = std::sync::Arc::downgrade(store);
     let spawn = std::thread::Builder::new().name("desktop-schedule-driver".to_string());
     let result = spawn.spawn(move || {
         let driver = altai_control_plane::SchedulerDriver::new(
@@ -154,15 +182,22 @@ fn ensure_desktop_schedule_driver(work_db: &Path) {
         );
         loop {
             std::thread::sleep(Duration::from_secs(60));
+            // The in-process WorkStore handle is this app run's proof that
+            // the workspace single-writer lock is ours; a released handle
+            // means the workspace is no longer ours to schedule.
+            let Some(_work_store) = work_store.upgrade() else {
+                log::info!("Desktop schedule driver stopping: workspace store released");
+                break;
+            };
             // A failed tick is logged and the loop continues: one bad tick
             // must not halt scheduling for every other routine.
             if let Err(error) = driver.tick(now_unix_seconds()) {
-                eprintln!("desktop schedule driver tick failed: {error}");
+                log::error!("desktop schedule driver tick failed: {error}");
             }
         }
     });
     if let Err(error) = result {
-        eprintln!("failed to spawn desktop schedule driver: {error}");
+        log::error!("failed to spawn desktop schedule driver: {error}");
     }
 }
 
@@ -322,7 +357,6 @@ impl WorkspaceRegistry {
         )?;
         migrated.insert(database.to_path_buf());
         drop(migrated);
-        ensure_desktop_schedule_driver(database);
         Ok(())
     }
 
@@ -376,6 +410,10 @@ impl WorkspaceRegistry {
             altai_core::WorkStore::open(database).map_err(|error| error.to_string())?,
         );
         stores.insert(database.to_path_buf(), store.clone());
+        // Scheduling cutover (CP-08-108): the desktop schedule driver is
+        // spawned only from this success path — an open that lost the
+        // workspace lock (WorkspaceHeld) must not leave a driver ticking.
+        ensure_desktop_schedule_driver(database, &store);
         Ok(store)
     }
 

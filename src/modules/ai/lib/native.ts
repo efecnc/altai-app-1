@@ -1496,13 +1496,30 @@ export const native = {
       workspaceKey,
       config,
     }),
-  schedulingAuthority: (workspacePath: string) =>
-    invoke<{
+  schedulingAuthority: async (workspacePath: string) => {
+    const authority = await invoke<{
       canonical: boolean;
       enabled: boolean;
       legacy_cron_compatibility: boolean;
       owner: string | null;
-    }>("control_plane_scheduling_authority", { workspacePath }),
+    }>("control_plane_scheduling_authority", { workspacePath });
+    if (typeof authority?.canonical !== "boolean") {
+      // A malformed authority payload must not be trusted as "not canonical":
+      // fall back to legacy semantics (and say so) instead of silently
+      // stopping renderer scheduling on garbage.
+      console.error(
+        `Malformed scheduling authority payload for ${workspacePath}; using legacy scheduling:`,
+        authority,
+      );
+      return {
+        canonical: false,
+        enabled: false,
+        legacy_cron_compatibility: false,
+        owner: null,
+      };
+    }
+    return authority;
+  },
   orchestrationPause: (workspaceKey: string) =>
     invoke<OrchestrationSnapshot>("orchestration_pause", { workspaceKey }),
   orchestrationStop: (workspaceKey: string) =>

@@ -159,8 +159,8 @@ pub use feature_flag_repository::{
     CONTROL_PLANE_ENABLED_FLAG,
 };
 pub use cron_automation_transfer::{
-    CronAutomationRecord, Disposition, LegacySchedule, SnapshotReport, SqliteCronAutomationTransfer,
-    TransferAttribution, TransferError,
+    AutomationTransferStatus, CronAutomationRecord, Disposition, LegacySchedule, SnapshotReport,
+    SqliteCronAutomationTransfer, TransferAttribution, TransferError,
 };
 pub use opentag_adapter::{
     normalize_opentag_event, NormalizedOpenTagEvent, OpenTagAdapterError,

@@ -30,20 +30,63 @@ use super::runtime::{
 /// feature-flag ledger records canonical scheduling as enabled with the
 /// legacy rollback switch un-pulled, the CronActor's ALTAI-hosted firing
 /// path stops — regardless of any retirement bookkeeping, so the flag flip
-/// alone is the switch. An unreadable ledger or workspace resolves to
-/// legacy behavior (the flag is "not yet decided").
+/// alone is the switch. An unreadable ledger or workspace falls back to the
+/// last successfully-read authority for that workspace (legacy view on the
+/// first observation), so a mid-run ledger failure can neither reopen the
+/// legacy firing path behind a canonical flag (dual dispatch) nor suppress
+/// a workspace that was last known legacy.
 pub(crate) fn canonical_scheduling_suppresses_fires(workspace_root: &Path) -> bool {
-    let work_db = match altai_core::resolve_workspace_from(Some(workspace_root), workspace_root) {
-        Ok(paths) => paths.work_db(),
-        Err(_) => return false,
-    };
-    let Ok(ledger) = altai_control_plane::SqliteFeatureFlagRepository::open(&work_db) else {
-        return false;
-    };
-    matches!(
+    match read_canonical_scheduling_bit(workspace_root) {
+        Some(canonical) => {
+            if let Ok(mut cache) = last_known_canonical().lock() {
+                cache.insert(workspace_root.to_path_buf(), canonical);
+            }
+            canonical
+        }
+        None => {
+            let fallback = last_known_canonical()
+                .lock()
+                .ok()
+                .and_then(|cache| cache.get(workspace_root).copied())
+                .unwrap_or(false);
+            log::warn!(
+                "Scheduling authority for {} is unreadable; using the last-known {} view",
+                workspace_root.display(),
+                if fallback { "canonical" } else { "legacy" },
+            );
+            fallback
+        }
+    }
+}
+
+/// Last successfully-read canonical bit per workspace root. Keyed by the
+/// resolved workspace root every caller already passes, so the map stays
+/// small (one entry per open workspace).
+fn last_known_canonical() -> &'static std::sync::Mutex<HashMap<std::path::PathBuf, bool>> {
+    static LAST_KNOWN: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<std::path::PathBuf, bool>>,
+    > = std::sync::OnceLock::new();
+    LAST_KNOWN.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Read the canonical bit straight from the ledger. `None` means the ledger
+/// could not be read this call (unresolvable workspace, unreadable
+/// database). A missing `work.db` is a successful read of an absent ledger —
+/// flags cannot be canonical without it — and is answered without opening
+/// the repository, which would otherwise materialize the database as a
+/// side effect of a read.
+fn read_canonical_scheduling_bit(workspace_root: &Path) -> Option<bool> {
+    let work_db = altai_core::resolve_workspace_from(Some(workspace_root), workspace_root)
+        .ok()?
+        .work_db();
+    if !work_db.exists() {
+        return Some(false);
+    }
+    let ledger = altai_control_plane::SqliteFeatureFlagRepository::open(&work_db).ok()?;
+    Some(matches!(
         altai_control_plane::resolve_schedule_authority(&ledger),
         Ok(authority) if authority.enabled && !authority.legacy_compatibility
-    )
+    ))
 }
 
 use super::tauri_sink::TauriEventSink;
@@ -309,6 +352,15 @@ impl HostAdapter for DesktopHost {
             .app_data_dir()
             .ok()
             .map(|dir| dir.join("checkpoints"));
+        // Scheduling cutover (CP-08-108): when canonical scheduling owns this
+        // workspace, the agent-facing `cron` tool is withheld at instance
+        // build. An automation created through it would be suppressed at fire
+        // time and never mapped into the canonical ledger — silent loss — so
+        // the same gate that stops the firing path closes the creation path.
+        let suppress_agent_cron = request
+            .workspace_root
+            .map(|root| canonical_scheduling_suppresses_fires(&resolve_workspace_root(Some(root))))
+            .unwrap_or(false);
         build_shared_instance(
             self,
             request,
@@ -316,6 +368,7 @@ impl HostAdapter for DesktopHost {
                 checkpoint_root,
                 scripted_responses: None,
                 channel_name: "tauri",
+                suppress_agent_cron,
             },
         )
         .await
@@ -340,5 +393,70 @@ impl HostAdapter for DesktopHost {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod scheduling_gate_tests {
+    use super::*;
+
+    fn work_db_for(root: &Path) -> std::path::PathBuf {
+        altai_core::resolve_workspace_from(Some(root), root)
+            .unwrap()
+            .work_db()
+    }
+
+    fn write_canonical_ledger(root: &Path) {
+        let work_db = work_db_for(root);
+        std::fs::create_dir_all(work_db.parent().unwrap()).unwrap();
+        use altai_control_plane::FeatureFlagRepository;
+        let ledger = altai_control_plane::SqliteFeatureFlagRepository::open(&work_db).unwrap();
+        ledger.set("control_plane_enabled", "true").unwrap();
+    }
+
+    #[test]
+    fn missing_work_db_reads_as_legacy_without_materializing_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        assert!(!canonical_scheduling_suppresses_fires(root));
+        assert!(
+            !work_db_for(root).exists(),
+            "a fire-time authority read must not create work.db"
+        );
+    }
+
+    #[test]
+    fn canonical_ledger_suppresses_fires() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write_canonical_ledger(root);
+        assert!(canonical_scheduling_suppresses_fires(root));
+    }
+
+    #[test]
+    fn unreadable_ledger_falls_back_to_last_known_canonical_view() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        // First observation with no ledger at all: legacy view.
+        assert!(!canonical_scheduling_suppresses_fires(root));
+        write_canonical_ledger(root);
+        assert!(canonical_scheduling_suppresses_fires(root));
+        // Corrupt the ledger (a directory is unreadable as a database): the
+        // gate must keep the last-known canonical view instead of failing
+        // open into a dual-dispatch window.
+        let work_db = work_db_for(root);
+        std::fs::remove_file(&work_db).unwrap();
+        std::fs::create_dir(&work_db).unwrap();
+        assert!(canonical_scheduling_suppresses_fires(root));
+    }
+
+    #[test]
+    fn first_unreadable_read_preserves_the_legacy_view() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let work_db = work_db_for(root);
+        std::fs::create_dir_all(work_db.parent().unwrap()).unwrap();
+        std::fs::create_dir(&work_db).unwrap();
+        assert!(!canonical_scheduling_suppresses_fires(root));
     }
 }

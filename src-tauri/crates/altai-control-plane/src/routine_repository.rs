@@ -70,41 +70,28 @@ impl SqliteRoutineRepository {
             connection: Mutex::new(connection),
         })
     }
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, RoutineError> {
-        self.connection.lock().map_err(|_| RoutineError::Internal {
-            reason: "sqlite routine lock poisoned".into(),
-        })
-    }
-    fn db(e: rusqlite::Error) -> RoutineError {
-        RoutineError::Internal { reason: e.to_string() }
-    }
-}
-
-impl RoutineRepository for SqliteRoutineRepository {
-    fn create(&self, routine: Routine) -> Result<Routine, RoutineError> {
+    /// Create a routine aggregate on a caller-owned connection, so a
+    /// multi-write flow (the cron automation transfer's per-automation
+    /// transaction) commits its routine and its bookkeeping atomically.
+    /// Same write as [`RoutineRepository::create`], on that connection.
+    pub fn create_in(connection: &Connection, routine: Routine) -> Result<Routine, RoutineError> {
         let payload = serde_json::to_string(&routine).map_err(|e| RoutineError::Internal {
             reason: e.to_string(),
         })?;
-        let mut connection = self.lock()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(Self::db)?;
-        let inserted = tx
+        let inserted = connection
             .execute(
                 "INSERT INTO control_plane_routines (routine_id, payload_json) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
                 params![routine.id.value, payload],
             )
             .map_err(Self::db)?;
         if inserted == 1 {
-            tx.commit().map_err(Self::db)?;
             return Ok(routine);
         }
         // A row already owns this id: idempotent only if it is byte-identical.
-        let existing = Self::read_routine(&tx, &routine.id)?.ok_or_else(|| RoutineError::Internal {
+        let existing = Self::read_routine(connection, &routine.id)?.ok_or_else(|| RoutineError::Internal {
             reason: "routine disappeared after insert conflict".into(),
         })?;
         if existing == routine {
-            tx.commit().map_err(Self::db)?;
             Ok(existing)
         } else {
             Err(RoutineError::Conflict {
@@ -112,9 +99,11 @@ impl RoutineRepository for SqliteRoutineRepository {
             })
         }
     }
-
-    fn append_revision(
-        &self,
+    /// Append an immutable intent revision on a caller-owned connection.
+    /// Same write as [`RoutineRepository::append_revision`], on that
+    /// connection.
+    pub fn append_revision_in(
+        connection: &Connection,
         routine_id: &RoutineId,
         revision: RoutineRevision,
     ) -> Result<Routine, RoutineError> {
@@ -126,15 +115,11 @@ impl RoutineRepository for SqliteRoutineRepository {
         let payload = serde_json::to_string(&revision).map_err(|e| RoutineError::Internal {
             reason: e.to_string(),
         })?;
-        let mut connection = self.lock()?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(Self::db)?;
-        let mut routine = Self::read_routine(&tx, routine_id)?.ok_or_else(|| RoutineError::NotFound {
+        let mut routine = Self::read_routine(connection, routine_id)?.ok_or_else(|| RoutineError::NotFound {
             routine_id: routine_id.value.clone(),
         })?;
         // Idempotent: appending the same revision id again is a no-op.
-        let already_present: bool = tx
+        let already_present: bool = connection
             .query_row(
                 "SELECT 1 FROM control_plane_routine_revisions WHERE routine_revision_id=?1",
                 [&revision.id.value],
@@ -148,7 +133,7 @@ impl RoutineRepository for SqliteRoutineRepository {
             // advance past the current one. This keeps the append-only log ordered
             // once the command port exposes append_revision over the wire.
             if let Some(current_revision_id) = routine.current_revision_id {
-                let current = Self::read_revision(&tx, &current_revision_id)?.ok_or_else(|| {
+                let current = Self::read_revision(connection, &current_revision_id)?.ok_or_else(|| {
                     RoutineError::Internal {
                         reason: "routine current revision missing".into(),
                     }
@@ -159,16 +144,17 @@ impl RoutineRepository for SqliteRoutineRepository {
                     });
                 }
             }
-            tx.execute(
-                "INSERT INTO control_plane_routine_revisions (routine_revision_id, routine_id, revision, payload_json) VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
-                params![
-                    revision.id.value,
-                    revision.routine_id.value,
-                    revision.revision.value() as i64,
-                    payload
-                ],
-            )
-            .map_err(Self::db)?;
+            connection
+                .execute(
+                    "INSERT INTO control_plane_routine_revisions (routine_revision_id, routine_id, revision, payload_json) VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
+                    params![
+                        revision.id.value,
+                        revision.routine_id.value,
+                        revision.revision.value() as i64,
+                        payload
+                    ],
+                )
+                .map_err(Self::db)?;
             routine.current_revision_id = Some(revision.id);
             routine.revision = routine.revision.next();
             routine.updated_at_unix_seconds = revision.created_at_unix_seconds;
@@ -176,12 +162,46 @@ impl RoutineRepository for SqliteRoutineRepository {
                 serde_json::to_string(&routine).map_err(|e| RoutineError::Internal {
                     reason: e.to_string(),
                 })?;
-            tx.execute(
-                "UPDATE control_plane_routines SET payload_json=?2 WHERE routine_id=?1",
-                params![routine.id.value, routine_payload],
-            )
-            .map_err(Self::db)?;
+            connection
+                .execute(
+                    "UPDATE control_plane_routines SET payload_json=?2 WHERE routine_id=?1",
+                    params![routine.id.value, routine_payload],
+                )
+                .map_err(Self::db)?;
         }
+        Ok(routine)
+    }
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, RoutineError> {
+        self.connection.lock().map_err(|_| RoutineError::Internal {
+            reason: "sqlite routine lock poisoned".into(),
+        })
+    }
+    fn db(e: rusqlite::Error) -> RoutineError {
+        RoutineError::Internal { reason: e.to_string() }
+    }
+}
+
+impl RoutineRepository for SqliteRoutineRepository {
+    fn create(&self, routine: Routine) -> Result<Routine, RoutineError> {
+        let mut connection = self.lock()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(Self::db)?;
+        let routine = Self::create_in(&tx, routine)?;
+        tx.commit().map_err(Self::db)?;
+        Ok(routine)
+    }
+
+    fn append_revision(
+        &self,
+        routine_id: &RoutineId,
+        revision: RoutineRevision,
+    ) -> Result<Routine, RoutineError> {
+        let mut connection = self.lock()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(Self::db)?;
+        let routine = Self::append_revision_in(&tx, routine_id, revision)?;
         tx.commit().map_err(Self::db)?;
         Ok(routine)
     }
@@ -284,10 +304,10 @@ impl RoutineRepository for SqliteRoutineRepository {
 
 impl SqliteRoutineRepository {
     fn read_routine(
-        tx: &rusqlite::Transaction<'_>,
+        connection: &Connection,
         id: &RoutineId,
     ) -> Result<Option<Routine>, RoutineError> {
-        let payload: Option<String> = tx
+        let payload: Option<String> = connection
             .query_row(
                 "SELECT payload_json FROM control_plane_routines WHERE routine_id=?1",
                 [&id.value],
@@ -305,10 +325,10 @@ impl SqliteRoutineRepository {
     }
 
     fn read_revision(
-        tx: &rusqlite::Transaction<'_>,
+        connection: &Connection,
         id: &RoutineRevisionId,
     ) -> Result<Option<RoutineRevision>, RoutineError> {
-        let payload: Option<String> = tx
+        let payload: Option<String> = connection
             .query_row(
                 "SELECT payload_json FROM control_plane_routine_revisions WHERE routine_revision_id=?1",
                 [&id.value],
